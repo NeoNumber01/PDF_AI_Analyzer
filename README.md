@@ -12,14 +12,9 @@
 
 ## 安装
 
-### 1. 安装 Poppler (PDF 转图片依赖)
+### 创建虚拟环境并安装依赖
 
-**Windows:**
-1. 下载 [Poppler for Windows](https://github.com/osber/poppler-windows/releases)
-2. 解压到 `C:\poppler`
-3. 将 `C:\poppler\bin` 添加到系统 PATH 环境变量
-
-### 2. 创建虚拟环境并安装依赖
+> 本项目使用 PyMuPDF 进行 PDF 转图片，无需安装 Poppler 等外部依赖。
 
 ```bash
 # 进入项目目录
@@ -94,8 +89,8 @@ PDF_AI_Analyzer/
 ## 故障排除
 
 ### PDF 转换失败
-- 确保 Poppler 已正确安装并添加到 PATH
-- 重新打开终端使 PATH 变更生效
+- 确保 PyMuPDF 已正确安装 (`pip install PyMuPDF`)
+- 检查 PDF 文件是否损坏或加密
 
 ### 登录检测不到
 - 手动登录 ChatGPT 后，程序会自动检测到并继续
