@@ -1,0 +1,186 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+            artifact_name: PDF_AI_Analyzer-Windows
+            executable_ext: .exe
+          - os: macos-latest
+            name: macOS
+            artifact_name: PDF_AI_Analyzer-macOS
+            executable_ext: ''
+          - os: ubuntu-latest
+            name: Linux
+            artifact_name: PDF_AI_Analyzer-Linux
+            executable_ext: ''
+
+    runs-on: ${{ matrix.os }}
+    name: Build for ${{ matrix.name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Build with PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          # Get PySide6 path
+          $pyside6_path = python -c "import PySide6; import os; print(os.path.dirname(PySide6.__file__))"
+          
+          pyinstaller `
+            --noconfirm `
+            --onedir `
+            --windowed `
+            --name=PDF_AI_Analyzer `
+            --add-data="config.py;." `
+            --add-data="src;src" `
+            --hidden-import=PySide6 `
+            --hidden-import=PySide6.QtCore `
+            --hidden-import=PySide6.QtGui `
+            --hidden-import=PySide6.QtWidgets `
+            --hidden-import=playwright `
+            --hidden-import=playwright.async_api `
+            --hidden-import=fitz `
+            --hidden-import=PIL `
+            --hidden-import=PIL.Image `
+            src/gui_pyside.py
+
+      - name: Build with PyInstaller (macOS/Linux)
+        if: matrix.os != 'windows-latest'
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --onedir \
+            --windowed \
+            --name=PDF_AI_Analyzer \
+            --add-data="config.py:." \
+            --add-data="src:src" \
+            --hidden-import=PySide6 \
+            --hidden-import=PySide6.QtCore \
+            --hidden-import=PySide6.QtGui \
+            --hidden-import=PySide6.QtWidgets \
+            --hidden-import=playwright \
+            --hidden-import=playwright.async_api \
+            --hidden-import=fitz \
+            --hidden-import=PIL \
+            --hidden-import=PIL.Image \
+            src/gui_pyside.py
+
+      - name: Create archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          Compress-Archive -Path "dist/PDF_AI_Analyzer/*" -DestinationPath "${{ matrix.artifact_name }}.zip"
+
+      - name: Create archive (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cd dist
+          zip -r "../${{ matrix.artifact_name }}.zip" PDF_AI_Analyzer.app
+
+      - name: Create archive (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd dist
+          tar -czvf "../${{ matrix.artifact_name }}.tar.gz" PDF_AI_Analyzer
+
+      - name: Upload artifact (Windows/macOS)
+        if: matrix.os != 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.zip
+          retention-days: 30
+
+      - name: Upload artifact (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: PDF AI Analyzer ${{ github.ref_name }}
+          body: |
+            ## 📦 PDF AI Analyzer ${{ github.ref_name }}
+            
+            ### 下载 / Downloads
+            
+            | 平台 Platform | 文件 File |
+            |---------------|-----------|
+            | Windows | `PDF_AI_Analyzer-Windows.zip` |
+            | macOS | `PDF_AI_Analyzer-macOS.zip` |
+            | Linux | `PDF_AI_Analyzer-Linux.tar.gz` |
+            
+            ### 安装说明 / Installation
+            
+            1. 下载对应平台的压缩包 / Download the archive for your platform
+            2. 解压到任意目录 / Extract to any directory
+            3. 运行 `PDF_AI_Analyzer` 可执行文件 / Run the `PDF_AI_Analyzer` executable
+            4. 首次运行需要安装 Playwright 浏览器 / Install Playwright browser on first run:
+               ```bash
+               playwright install chromium
+               ```
+            
+            ### 更新日志 / Changelog
+            
+            - 查看完整更新请参考 [Commits](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
+          files: |
+            artifacts/PDF_AI_Analyzer-Windows/*.zip
+            artifacts/PDF_AI_Analyzer-macOS/*.zip
+            artifacts/PDF_AI_Analyzer-Linux/*.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
