@@ -53,34 +53,40 @@ class ChatGPTAutomation(BaseAIAutomation):
         ],
     }
     
-    async def upload_image_and_send(self, image_path: str, prompt: str) -> None:
+    async def upload_images_and_send(self, image_paths: list, prompt: str) -> None:
         """
-        上传图片并发送提示词
+        上传一张或多张图片并发送提示词
         
         Args:
-            image_path: 图片文件路径
+            image_paths: 图片文件路径列表
             prompt: 提示词文本
         """
-        print(f"[ChatGPT] 正在上传图片: {Path(image_path).name}")
-        
-        # 使用更精确的选择器 - 选择第一个文件输入
-        file_input = self.page.locator('input[type="file"][accept*="image"]').first
-        
-        try:
-            await file_input.set_input_files(image_path, timeout=10000)
-            print("图片上传成功 ✓")
-        except Exception as e:
-            print(f"直接上传失败，尝试点击附件按钮...")
-            # 尝试点击附件按钮
-            await self._try_click(self.SELECTORS['attach_button'])
-            await asyncio.sleep(1)
+        # 依次上传所有图片
+        for image_path in image_paths:
+            print(f"[ChatGPT] 正在上传图片: {Path(image_path).name}")
             
-            # 再次尝试上传
+            # 使用更精确的选择器 - 选择第一个文件输入
             file_input = self.page.locator('input[type="file"][accept*="image"]').first
-            await file_input.set_input_files(image_path)
-            print("图片上传成功 ✓")
+            
+            try:
+                await file_input.set_input_files(image_path, timeout=10000)
+                print(f"图片上传成功 ✓")
+            except Exception as e:
+                print(f"直接上传失败，尝试点击附件按钮...")
+                # 尝试点击附件按钮
+                await self._try_click(self.SELECTORS['attach_button'])
+                await asyncio.sleep(1)
+                
+                # 再次尝试上传
+                file_input = self.page.locator('input[type="file"][accept*="image"]').first
+                await file_input.set_input_files(image_path)
+                print(f"图片上传成功 ✓")
+            
+            await asyncio.sleep(2)  # 等待图片上传完成
         
-        await asyncio.sleep(3)  # 等待图片上传完成
+        # 等待所有图片上传完成
+        if len(image_paths) > 1:
+            await asyncio.sleep(2)
         
         # 输入提示词
         print("[ChatGPT] 正在输入提示词...")

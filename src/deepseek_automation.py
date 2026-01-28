@@ -22,11 +22,10 @@ class DeepSeekAutomation(BaseAIAutomation):
     PLATFORM_NAME = "DeepSeek"
     PLATFORM_URL = "https://chat.deepseek.com/"
     
-    async def upload_image_and_send(self, image_path: str, prompt: str) -> None:
-        """上传图片并发送提示词 - 使用剪贴板粘贴方式"""
-        print(f"[DeepSeek] 正在上传图片: {Path(image_path).name}")
+    async def upload_images_and_send(self, image_paths: list, prompt: str) -> None:
+        """上传一张或多张图片并发送提示词 - 使用剪贴板粘贴方式"""
         
-        # Step 1: 查找并聚焦输入区域
+        # Step 1: 查找输入区域选择器
         input_selectors = [
             '#chat-input',
             'textarea[placeholder]',
@@ -35,41 +34,78 @@ class DeepSeekAutomation(BaseAIAutomation):
             '.chat-input',
         ]
         
-        input_area = None
-        for selector in input_selectors:
-            try:
-                element = self.page.locator(selector).first
-                if await element.count() > 0:
-                    input_area = element
-                    await element.click()
-                    print(f"[DeepSeek] 聚焦输入区域: {selector}")
-                    await asyncio.sleep(0.5)
-                    break
-            except:
-                continue
+        async def find_and_focus_input():
+            """查找并聚焦输入区域"""
+            for selector in input_selectors:
+                try:
+                    element = self.page.locator(selector).first
+                    if await element.count() > 0:
+                        await element.click()
+                        print(f"[DeepSeek] 聚焦输入区域: {selector}")
+                        await asyncio.sleep(0.5)
+                        return element
+                except:
+                    continue
+            return None
         
+        input_area = await find_and_focus_input()
         if not input_area:
             raise Exception("找不到输入区域")
         
-        # Step 2: 使用剪贴板粘贴图片
-        print("[DeepSeek] 使用剪贴板粘贴方式...")
+        # Step 2: 依次上传所有图片
+        for idx, image_path in enumerate(image_paths):
+            print(f"[DeepSeek] 正在上传图片 {idx+1}/{len(image_paths)}: {Path(image_path).name}")
+            
+            # 每次上传前重新聚焦输入区域（解决递归输入问题）
+            if idx > 0:
+                await asyncio.sleep(0.5)
+                input_area = await find_and_focus_input()
+                if not input_area:
+                    print(f"[DeepSeek] 警告: 无法聚焦输入区域, 跳过图片 {idx+1}")
+                    continue
+            
+            upload_success = False
+            
+            # 优先尝试 file input 方式（更可靠）
+            try:
+                file_uploaded = await self._try_file_input_upload(image_path)
+                if file_uploaded:
+                    upload_success = True
+                    print(f"[DeepSeek] 图片 {idx+1} 上传成功 (file input) ✓")
+            except Exception as e:
+                print(f"[DeepSeek] file input 方式失败: {e}")
+            
+            # 如果 file input 失败，尝试剪贴板方式
+            if not upload_success:
+                try:
+                    await self._paste_image_from_clipboard(input_area, image_path)
+                    upload_success = True
+                    print(f"[DeepSeek] 图片 {idx+1} 粘贴成功 (clipboard) ✓")
+                except Exception as e:
+                    print(f"[DeepSeek] 剪贴板方式失败: {e}")
+            
+            if not upload_success:
+                print(f"[DeepSeek] 警告: 图片 {idx+1} 上传失败，继续处理下一张")
+                continue
+            
+            # 每张图片上传后都等待解析（解决递归输入问题）
+            if len(image_paths) > 1:
+                print(f"[DeepSeek] 等待图片 {idx+1} 解析...")
+                await self._wait_for_image_parsed(timeout=15.0)
+            
+            await asyncio.sleep(1)
         
-        try:
-            await self._paste_image_from_clipboard(input_area, image_path)
-            print("[DeepSeek] 图片粘贴成功 ✓")
-        except Exception as e:
-            print(f"[DeepSeek] 剪贴板方式失败: {e}")
-            # 尝试传统方式
-            await self._try_file_input_upload(image_path)
-        
-        # Step 3: 等待图片解析完成
-        print("[DeepSeek] 等待图片解析...")
+        # Step 3: 最终等待所有图片解析完成
+        print("[DeepSeek] 等待所有图片解析...")
         await self._wait_for_image_parsed()
         print("[DeepSeek] 图片解析完成 ✓")
         
         # Step 4: 输入提示词
         print("[DeepSeek] 正在输入提示词...")
-        await input_area.click()
+        input_area = await find_and_focus_input()
+        if not input_area:
+            raise Exception("输入提示词时找不到输入区域")
+        
         await asyncio.sleep(0.3)
         
         # 对于 textarea 使用 fill，对于 contenteditable 使用 type
@@ -84,7 +120,7 @@ class DeepSeekAutomation(BaseAIAutomation):
         
         await asyncio.sleep(1)
         
-        # Step 4: 发送消息
+        # Step 5: 发送消息
         send_selectors = [
             'button[type="submit"]',
             'button[aria-label*="Send" i]',
@@ -209,15 +245,31 @@ class DeepSeekAutomation(BaseAIAutomation):
         await input_area.evaluate(script)
         await asyncio.sleep(2)
     
-    async def _try_file_input_upload(self, image_path: str):
-        """尝试传统 file input 上传"""
+    async def _try_file_input_upload(self, image_path: str) -> bool:
+        """尝试传统 file input 上传，返回是否成功"""
         try:
-            file_inputs = self.page.locator('input[type="file"]')
-            if await file_inputs.count() > 0:
-                await file_inputs.first.set_input_files(image_path)
-                print("[DeepSeek] 使用 file input 上传成功")
-        except:
-            pass
+            # 尝试多种 file input 选择器
+            file_input_selectors = [
+                'input[type="file"]',
+                'input[type="file"][accept*="image"]',
+                '#image-upload',
+                '.upload-input',
+            ]
+            
+            for selector in file_input_selectors:
+                try:
+                    file_inputs = self.page.locator(selector)
+                    if await file_inputs.count() > 0:
+                        await file_inputs.first.set_input_files(image_path)
+                        await asyncio.sleep(1)  # 等待文件处理
+                        return True
+                except:
+                    continue
+            
+            return False
+        except Exception as e:
+            print(f"[DeepSeek] file input 上传异常: {e}")
+            return False
     
     async def _wait_for_image_parsed(self, timeout: float = 30.0):
         """

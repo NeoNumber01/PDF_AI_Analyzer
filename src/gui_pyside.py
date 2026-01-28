@@ -6,6 +6,7 @@ Design: Deep Space Background + High-End Glass + Noise Texture
 """
 
 import sys
+import os
 import asyncio
 import threading
 import random
@@ -27,6 +28,8 @@ from PySide6.QtGui import (
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import config
+from src.page_preview import PagePreviewPanel, PageGroupManager, PagePreviewDialog
+from src.i18n import tr, set_language, get_language, toggle_language
 
 
 # ═══════════════════════════════════════════════════════════
@@ -240,7 +243,7 @@ class StatusBar(GlassCard):
         self.icon_label.setStyleSheet("font-size: 16px; background: transparent;")
         container.addWidget(self.icon_label)
         
-        self.msg_label = QLabel("就绪")
+        self.msg_label = QLabel(tr("msg_ready"))
         self.msg_label.setStyleSheet(f"""
             color: {T.text_primary};
             font-size: 14px;
@@ -463,6 +466,7 @@ class MainWindow(QMainWindow):
     sig_enable_stop = Signal(bool)      # enabled
     sig_progress = Signal(int, str)     # value, text
     sig_reset_ui = Signal()
+    sig_process_next_pdf = Signal(int)  # next_pdf_idx - 处理下一个 PDF
     
     def __init__(self):
         super().__init__()
@@ -475,6 +479,18 @@ class MainWindow(QMainWindow):
         self.current_pdf_index = 0  # 当前处理的 PDF 索引
         self.current_page_index = 0  # 当前处理的页面索引
         self.processed_images = {}  # {pdf_path: [已处理的图片路径列表]}
+        
+        # 页面预览相关
+        self.all_page_images = []     # 所有 PDF 切分后的图片路径
+        self.page_enabled = []         # 每页是否启用
+        self.page_groups = []          # 自定义分组 [[0,1,2], [3,4], ...]
+        self.group_mode = "single"     # "single" | "fixed" | "custom"
+        self.pages_per_batch = 1       # 固定模式下每批页数
+        self.current_batch_index = 0   # 当前处理的批次索引
+        
+        # PDF 文件状态缓存 - 保存每个文件的处理状态
+        # {pdf_path: {'images': [...], 'enabled': [...], 'groups': [...], 'mode': str, 'pages_per_batch': int}}
+        self.pdf_cache = {}
         
         # 创建持久的事件循环 (在单独线程中运行)
         self._loop = asyncio.new_event_loop()
@@ -491,11 +507,37 @@ class MainWindow(QMainWindow):
         self.sig_enable_stop.connect(lambda e: self.btn_stop.setEnabled(e))
         self.sig_progress.connect(self._upd_prog)
         self.sig_reset_ui.connect(self._reset_ui)
+        self.sig_process_next_pdf.connect(self._do_process_next_pdf)
     
     def _do_log(self, msg, level):
         """接收信号并更新状态栏"""
         self.status.show_message(msg, level)
         print(f"[{level.upper()}] {msg}")
+    
+    def _do_process_next_pdf(self, next_pdf_idx):
+        """处理下一个 PDF（在主线程中执行）"""
+        print(f"[DEBUG] _do_process_next_pdf 被调用: idx={next_pdf_idx}")
+        
+        if not self.is_running:
+            self._reset_ui()
+            return
+            
+        if next_pdf_idx < 0 or next_pdf_idx >= len(self.pdf_files):
+            self._reset_ui()
+            return
+            
+        print(f"[DEBUG] 切换到 PDF {next_pdf_idx + 1}")
+        self.file_list.setCurrentRow(next_pdf_idx)
+        # 清除当前的 all_page_images
+        self.all_page_images = []
+        self.custom_batch_order = None
+        self.page_enabled = []
+        self.page_groups = []
+        
+        # 设置自动处理标志
+        self._auto_process_next_pdf = True
+        # 预览下一个 PDF（加载完成后会自动开始处理）
+        self._preview_pages()
     
     def _run_loop(self):
         """在后台线程中运行事件循环"""
@@ -505,6 +547,42 @@ class MainWindow(QMainWindow):
     def _run_async(self, coro):
         """在持久事件循环中运行协程"""
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
+    
+    def closeEvent(self, event):
+        """关闭应用时清理缓存和临时文件"""
+        print("[DEBUG] 正在清理缓存...")
+        
+        # 清理缓存中的图片文件
+        for pdf_path, cache in self.pdf_cache.items():
+            if 'images' in cache:
+                for img_path in cache['images']:
+                    try:
+                        if os.path.exists(img_path):
+                            os.remove(img_path)
+                    except Exception as e:
+                        print(f"[WARNING] 无法删除缓存图片 {img_path}: {e}")
+        
+        # 清空缓存字典
+        self.pdf_cache.clear()
+        self.all_page_images.clear()
+        self.page_enabled.clear()
+        self.page_groups.clear()
+        
+        # 清理临时目录
+        if hasattr(self, 'temp_dir') and self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                print(f"[DEBUG] 已清理临时目录: {self.temp_dir}")
+            except Exception as e:
+                print(f"[WARNING] 无法删除临时目录: {e}")
+        
+        # 停止事件循环
+        if hasattr(self, '_loop') and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        
+        print("[DEBUG] 缓存清理完成")
+        super().closeEvent(event)
         
     def ui(self):
         central = QWidget()
@@ -543,7 +621,8 @@ class MainWindow(QMainWindow):
         l.addStretch()
         
         # 平台选择下拉框
-        platform_label = QLabel("AI 平台:")
+        self.lbl_platform = QLabel(tr("label_platform"))
+        platform_label = self.lbl_platform
         platform_label.setStyleSheet(f"color: {T.text_secondary}; font-size: 13px; background: transparent; margin-right: 8px;")
         l.addWidget(platform_label)
         
@@ -588,6 +667,29 @@ class MainWindow(QMainWindow):
         
         l.addSpacing(16)
         
+        # 语言切换按钮
+        self.btn_lang = QPushButton("🌐 EN")
+        self.btn_lang.setFixedSize(70, 36)
+        self.btn_lang.setCursor(Qt.PointingHandCursor)
+        self.btn_lang.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(0, 0, 0, 0.3);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 8px;
+                color: {T.text_secondary};
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255, 255, 255, 0.1);
+                color: {T.text_primary};
+                border: 1px solid {T.accent};
+            }}
+        """)
+        self.btn_lang.clicked.connect(self._toggle_language)
+        l.addWidget(self.btn_lang)
+        
+        l.addSpacing(8)
+        
         self.btn_browser = GlassButton("启动浏览器", "primary")
         self.btn_browser.clicked.connect(self._start_browser)
         
@@ -606,7 +708,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(bar)
         
     def _sidebar(self, layout):
-        card = GlassCard("文档队列")
+        self.card_doc_queue = GlassCard(tr("card_doc_queue"))
+        card = self.card_doc_queue
         card.setMinimumWidth(320)
         
         self.file_list = DraggableListWidget()
@@ -617,22 +720,384 @@ class MainWindow(QMainWindow):
         # Tools
         tools = QHBoxLayout()
         for i, tip, func in [
-            ("+", "添加", self._add),
-            ("↑", "上移", self._up), ("↓", "下移", self._down), ("×", "清空", self._clear)
+            ("+", tr("btn_add"), self._add),
+            ("↑", tr("btn_move_up"), self._up), ("↓", tr("btn_move_down"), self._down), ("×", tr("btn_clear"), self._clear)
         ]:
             b = IconButton(i, tip)
             b.clicked.connect(func)
             tools.addWidget(b)
+        
+        # 预览按钮
+        self.btn_preview = GlassButton(tr("btn_preview"), "secondary")
+        self.btn_preview.setFixedWidth(90)
+        self.btn_preview.clicked.connect(self._preview_pages)
+        tools.addWidget(self.btn_preview)
+        
         card.addLayout(tools)
         
-        # 55% 占比
-        layout.addWidget(card, 55)
+        # 50% 占比（原来是35%，现在去掉嵌入式预览区域后增加）
+        layout.addWidget(card, 50)
+        
+        # 创建页面预览弹窗（但不显示）
+        self._init_preview_dialog()
+
+    def _init_preview_dialog(self):
+        """初始化页面预览弹窗"""
+        self.preview_dialog = PagePreviewDialog(self)
+        self.preview_dialog.page_toggled.connect(self._on_page_toggled)
+        self.preview_dialog.group_mode_changed.connect(self._on_group_mode_changed)
+        self.preview_dialog.pages_per_batch_changed.connect(self._on_pages_per_batch_changed)
+        self.preview_dialog.groups_changed.connect(self._on_groups_changed)
+        self.preview_dialog.batch_order_changed.connect(self._on_batch_order_changed)
+        
+        # 弹窗关闭时保存状态
+        self.preview_dialog.closing.connect(self._save_current_pdf_state)
+        
+        # 为了兼容性，保留这些属性的引用
+        self.page_preview = self.preview_dialog.page_preview
+        self.group_manager = self.preview_dialog.group_manager
+        
+    def _on_page_toggled(self, index: int, enabled: bool):
+        """页面启用/禁用"""
+        if 0 <= index < len(self.page_enabled):
+            self.page_enabled[index] = enabled
+            enabled_count = sum(self.page_enabled)
+            self._log(tr("msg_enabled_pages", enabled_count, len(self.page_enabled)))
+            
+    def _on_selection_changed(self, indices: list):
+        """选中项改变"""
+        if indices:
+            self._log(tr("msg_selected_pages", len(indices)), "info")
+            
+    def _on_group_mode_changed(self, mode: str):
+        """分组模式改变"""
+        self.group_mode = mode
+        mode_names = {"single": tr("mode_single"), "fixed": tr("mode_fixed"), "custom": tr("mode_custom")}
+        self._log(tr("msg_group_mode", mode_names.get(mode, mode)))
+        
+    def _on_pages_per_batch_changed(self, value: int):
+        """固定页数改变"""
+        self.pages_per_batch = value
+        self._log(tr("msg_pages_per_batch", value))
+        
+    def _on_groups_changed(self, groups: list):
+        """分组列表改变"""
+        self.page_groups = groups
+        self._log(tr("msg_groups_count", len(groups)))
+        
+    def _on_batch_order_changed(self, batch_order: list):
+        """批次顺序改变"""
+        self.custom_batch_order = batch_order
+        print(f"[DEBUG] _on_batch_order_changed: 收到信号，batch_order = {len(batch_order)} 批次")
+        print(f"[DEBUG] _on_batch_order_changed: self.custom_batch_order 已更新")
+        
+    def _create_group_from_selection(self):
+        """从当前选中创建分组"""
+        selected = self.page_preview.get_selected_indices()
+        if not selected:
+            self._log(tr("msg_select_pages_first"), "warning")
+            return
+        self.group_manager.add_group(selected)
+        self._log(tr("msg_group_created", ', '.join([str(i+1) for i in selected])), "success")
+        
+    def _preview_pages(self):
+        """预览当前 PDF 的所有页面"""
+        if not self.pdf_files:
+            self._log(tr("msg_add_pdf_first"), "warning")
+            return
+        
+        # 获取当前选中的 PDF
+        current_row = self.file_list.currentRow()
+        if current_row < 0:
+            current_row = 0
+        current_pdf = self.pdf_files[current_row] if current_row < len(self.pdf_files) else None
+        
+        if not current_pdf:
+            self._log("请选择要预览的 PDF 文件", "warning")
+            return
+        
+        # 检查缓存中是否已有该 PDF 的切图结果
+        if current_pdf in self.pdf_cache:
+            cache = self.pdf_cache[current_pdf]
+            self.all_page_images = cache['images']
+            self.page_enabled = cache['enabled']
+            self.page_groups = cache.get('groups', [])
+            self.custom_batch_order = cache.get('batch_order', None)  # 恢复批次顺序
+            self._current_preview_pdf = current_pdf  # 更新当前预览的 PDF
+            self._log(tr("msg_from_cache", len(self.all_page_images)), "success")
+            self._load_preview_from_cache()
+            return
+            
+        self._log(tr("msg_splitting_pdf"), "info")
+        self._current_preview_pdf = current_pdf  # 保存当前预览的 PDF
+        
+        # 在后台线程中转换 PDF
+        async def convert():
+            try:
+                from src.pdf_converter import convert_pdf_to_images
+                images = convert_pdf_to_images(current_pdf)
+                        
+                self.all_page_images = images if images else []
+                self.page_enabled = [True] * len(self.all_page_images)
+                self.page_groups = []
+                self.custom_batch_order = None  # 新 PDF 没有自定义顺序
+                
+                # 保存到缓存
+                self.pdf_cache[current_pdf] = {
+                    'images': self.all_page_images.copy(),
+                    'enabled': self.page_enabled.copy(),
+                    'groups': [],
+                    'batch_order': None
+                }
+                
+                # 在主线程更新 UI
+                from PySide6.QtCore import QMetaObject, Qt as QtCoreQt
+                QMetaObject.invokeMethod(
+                    self, "_load_preview_images", 
+                    QtCoreQt.QueuedConnection
+                )
+                
+            except Exception as e:
+                self.sig_log.emit(tr("msg_preview_failed", str(e)), "error")
+                
+        self._run_async(convert())
+    
+    from PySide6.QtCore import Slot
+    
+    @Slot()
+    def _load_preview_images(self):
+        """加载预览图片到弹窗并显示（主线程）"""
+        self.preview_dialog.load_pages(self.all_page_images)
+        self.page_groups = []
+        self.custom_batch_order = None  # 清除自定义顺序
+        self.preview_dialog.custom_batch_order = None  # 同步清除弹窗中的顺序
+        self._log(f"已加载 {len(self.all_page_images)} 页", "success")
+        
+        # 检查是否需要自动处理下一个 PDF
+        if getattr(self, '_auto_process_next_pdf', False):
+            self._auto_process_next_pdf = False
+            self._is_auto_next_pdf = True  # 标记为自动处理下一个PDF，不是续传
+            print(f"[DEBUG] _load_preview_images: 自动开始处理下一个 PDF")
+            # 延迟一下再开始处理
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, self._start_processing)
+            return
+        
+        # 显示预览弹窗
+        self.preview_dialog.show()
+        self.preview_dialog.raise_()
+        self.preview_dialog.activateWindow()
+        
+    def _load_preview_from_cache(self):
+        """从缓存加载预览（恢复之前的状态）"""
+        # 保存当前预览的 PDF 路径
+        current_row = self.file_list.currentRow()
+        if current_row >= 0 and current_row < len(self.pdf_files):
+            self._current_preview_pdf = self.pdf_files[current_row]
+        
+        print(f"[DEBUG] _load_preview_from_cache: page_groups = {self.page_groups}")
+        
+        # 只加载页面缩略图（不清空分组）
+        self.preview_dialog.page_preview.load_pages(self.all_page_images)
+        
+        # 设置 GroupManagerPanel 的页面数据
+        pages_dict = {i: path for i, path in enumerate(self.all_page_images)}
+        self.preview_dialog.group_manager_panel.set_pages(pages_dict)
+        
+        # 恢复页面启用状态
+        for i, enabled in enumerate(self.page_enabled):
+            if i < len(self.preview_dialog.page_preview.thumbnails):
+                self.preview_dialog.page_preview.thumbnails[i].set_checked(enabled)
+        
+        # 恢复分组状态
+        print(f"[DEBUG] 恢复分组: {len(self.page_groups)} 个分组")
+        
+        # 清空并重建 PagePreviewPanel 的分组
+        self.preview_dialog.page_preview.custom_groups.clear()
+        self.preview_dialog.page_preview.next_group_id = 0
+        
+        # 清空并重建 GroupManagerPanel 的分组
+        self.preview_dialog.group_manager_panel.groups.clear()
+        self.preview_dialog.group_manager_panel.next_group_id = 0
+        
+        if self.page_groups:
+            for group in self.page_groups:
+                # 添加到 PagePreviewPanel
+                group_id = self.preview_dialog.page_preview.next_group_id
+                self.preview_dialog.page_preview.next_group_id += 1
+                self.preview_dialog.page_preview.custom_groups.append(group.copy())
+                
+                # 设置缩略图的分组标记
+                for idx in group:
+                    thumb = self.preview_dialog.page_preview._get_thumbnail_by_index(idx)
+                    if thumb:
+                        thumb.set_group(group_id)
+                
+                # 添加到 GroupManagerPanel
+                if len(group) >= 2:
+                    self.preview_dialog.group_manager_panel.add_group(group)
+        
+        # 刷新显示
+        self.preview_dialog.group_manager_panel._refresh_cards()
+        self.preview_dialog.group_manager.update_preview(len(self.all_page_images))
+        
+        print(f"[DEBUG] GroupManagerPanel 分组数: {len(self.preview_dialog.group_manager_panel.groups)}")
+        
+        # 恢复批次顺序
+        if hasattr(self, 'custom_batch_order') and self.custom_batch_order:
+            self.preview_dialog.custom_batch_order = self.custom_batch_order
+            print(f"[DEBUG] 恢复批次顺序: {len(self.custom_batch_order)} 批次")
+        else:
+            self.preview_dialog.custom_batch_order = None
+        
+        # 检查是否需要自动处理下一个 PDF（从缓存加载的情况）
+        if getattr(self, '_auto_process_next_pdf', False):
+            self._auto_process_next_pdf = False
+            self._is_auto_next_pdf = True  # 标记为自动处理模式，防止 _start_processing 进入循环
+            print(f"[DEBUG] _load_preview_from_cache: 自动开始处理下一个 PDF")
+            # 延迟一下再开始处理
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(500, self._start_processing)
+            return
+        
+        # 显示预览弹窗
+        self.preview_dialog.show()
+        self.preview_dialog.raise_()
+        self.preview_dialog.activateWindow()
+        
+    def _save_current_pdf_state(self):
+        """保存当前 PDF 的处理状态到缓存"""
+        if not hasattr(self, '_current_preview_pdf') or not self._current_preview_pdf:
+            print("[DEBUG] _save_current_pdf_state: 没有当前预览的PDF")
+            return
+            
+        pdf_path = self._current_preview_pdf
+        print(f"[DEBUG] _save_current_pdf_state: 保存 {pdf_path}")
+        
+        # 获取页面启用状态
+        enabled = []
+        for thumb in self.preview_dialog.page_preview.thumbnails:
+            enabled.append(thumb.is_checked())
+        
+        # 获取分组状态 - 从 GroupManagerPanel 获取（因为删除等操作在这里）
+        groups = self.preview_dialog.group_manager_panel.get_groups_list()
+        print(f"[DEBUG] 保存分组状态: {len(groups)} 个分组")
+        
+        # 同步更新 page_groups
+        self.page_groups = [g.copy() for g in groups]
+        
+        # 获取自定义批次顺序 - 优先使用 MainWindow 的值，因为信号更新的是这个
+        batch_order = getattr(self, 'custom_batch_order', None)
+        if batch_order is None:
+            batch_order = getattr(self.preview_dialog, 'custom_batch_order', None)
+        
+        print(f"[DEBUG] _save_current_pdf_state: batch_order = {batch_order is not None}, length = {len(batch_order) if batch_order else 0}")
+        
+        # 更新或创建缓存
+        if pdf_path not in self.pdf_cache:
+            self.pdf_cache[pdf_path] = {
+                'images': self.all_page_images.copy(),
+                'enabled': enabled,
+                'groups': [g.copy() for g in groups],
+                'batch_order': batch_order
+            }
+        else:
+            self.pdf_cache[pdf_path]['enabled'] = enabled
+            self.pdf_cache[pdf_path]['groups'] = [g.copy() for g in groups]
+            self.pdf_cache[pdf_path]['batch_order'] = batch_order
+        
+        print(f"[DEBUG] 缓存已更新，groups: {len(self.pdf_cache[pdf_path]['groups'])}, batch_order saved: {self.pdf_cache[pdf_path]['batch_order'] is not None}")
+        
+    def _get_page_batches(self) -> list:
+        """
+        根据当前设置生成页面批次
+        
+        Returns:
+            list of lists: [[img1, img2], [img3], ...] 每个子列表是一批要一起发送的图片
+        """
+        # 获取启用的页面索引 - 优先从预览弹窗获取实时数据
+        if hasattr(self, 'preview_dialog') and self.preview_dialog:
+            page_enabled = self.preview_dialog.page_preview.get_page_enabled_list()
+            page_groups = self.preview_dialog.group_manager_panel.get_groups_list()
+            print(f"[DEBUG] _get_page_batches: 从预览弹窗获取实时数据")
+        else:
+            page_enabled = self.page_enabled
+            page_groups = self.page_groups
+            print(f"[DEBUG] _get_page_batches: 使用缓存数据")
+        
+        enabled_indices = [i for i, enabled in enumerate(page_enabled) if enabled]
+        print(f"[DEBUG] _get_page_batches: enabled_indices = {enabled_indices}")
+        
+        if not enabled_indices:
+            return []
+            
+        batches = []
+        
+        # 优先使用自定义批次顺序
+        print(f"[DEBUG] _get_page_batches: custom_batch_order = {getattr(self, 'custom_batch_order', None) is not None}")
+        print(f"[DEBUG] _get_page_batches: page_groups = {page_groups}")
+        
+        if hasattr(self, 'custom_batch_order') and self.custom_batch_order:
+            # 使用用户自定义的排序
+            print(f"[DEBUG] _get_page_batches: 使用自定义顺序，共 {len(self.custom_batch_order)} 批次")
+            print(f"[DEBUG] custom_batch_order 内容: {self.custom_batch_order}")
+            for i, batch_info in enumerate(self.custom_batch_order):
+                pages = batch_info.get("pages", [])
+                valid_indices = [idx for idx in pages if idx in enabled_indices]
+                if valid_indices:
+                    batch = [self.all_page_images[idx] for idx in valid_indices]
+                    batches.append(batch)
+                    print(f"[DEBUG] 批次 {i+1}: 页面 {valid_indices}, 共 {len(batch)} 张图片")
+            print(f"[DEBUG] _get_page_batches: 生成 {len(batches)} 批次")
+            return batches
+        
+        # 检查是否有自定义分组 - 如果有分组则使用分组模式
+        if page_groups and len(page_groups) > 0:
+            # 自定义分组模式 - 按页码顺序发送
+            # 构建批次列表，每个批次记录 (最小页码, 批次内容)
+            batch_with_order = []
+            used_indices = set()
+            
+            # 处理分组
+            for group in page_groups:
+                valid_indices = [idx for idx in group if idx in enabled_indices]
+                if valid_indices:
+                    min_page = min(valid_indices)  # 分组按最小页码排序
+                    batch = [self.all_page_images[idx] for idx in valid_indices]
+                    batch_with_order.append((min_page, batch))
+                    used_indices.update(valid_indices)
+            
+            # 处理未分组的页面
+            for idx in enabled_indices:
+                if idx not in used_indices:
+                    batch_with_order.append((idx, [self.all_page_images[idx]]))
+            
+            # 按页码顺序排序
+            batch_with_order.sort(key=lambda x: x[0])
+            batches = [batch for _, batch in batch_with_order]
+            
+        elif self.group_mode == "fixed" and self.pages_per_batch > 1:
+            # 固定N页模式
+            n = self.pages_per_batch
+            for i in range(0, len(enabled_indices), n):
+                batch_indices = enabled_indices[i:i+n]
+                batch = [self.all_page_images[idx] for idx in batch_indices]
+                batches.append(batch)
+                
+        else:
+            # 单页模式：每页单独发送
+            for idx in enabled_indices:
+                batches.append([self.all_page_images[idx]])
+                
+        return batches
         
     def _workspace(self, layout):
+
         space = QVBoxLayout()
         space.setSpacing(T.space_l)
         
-        progress_card = GlassCard("处理进度")
+        self.progress_card = GlassCard(tr("card_progress"))
+        progress_card = self.progress_card
         progress_h = QHBoxLayout()
         self.p_bar = GlassProgressBar()
         progress_h.addWidget(self.p_bar, 1)
@@ -640,21 +1105,24 @@ class MainWindow(QMainWindow):
         self.p_lbl.setStyleSheet(f"color: {T.accent}; font-weight: bold; font-size: 18px; margin-left: 10px; background: transparent;")
         progress_h.addWidget(self.p_lbl)
         progress_card.addLayout(progress_h)
-        self.p_status = QLabel("等待开始...")
+        self.p_status = QLabel(tr("msg_ready"))
         self.p_status.setStyleSheet(f"color: {T.text_tertiary}; font-size: 13px; margin-top: 5px; background: transparent;")
         progress_card.addWidget(self.p_status)
         space.addWidget(progress_card)
         
-        settings_card = GlassCard("处理设置")
+        self.settings_card = GlassCard(tr("card_settings"))
+        settings_card = self.settings_card
         form = QVBoxLayout()
         form.setSpacing(T.space_m)
-        l1 = QLabel("AI 提示词")
+        self.lbl_prompt = QLabel(tr("label_prompt"))
+        l1 = self.lbl_prompt
         l1.setStyleSheet(f"color: {T.text_secondary}; background: transparent;")
         form.addWidget(l1)
         self.in_prompt = GlassInput("输入自定义 Prompt...")
         self.in_prompt.setText(config.PROMPT_TEXT)
         form.addWidget(self.in_prompt)
-        l2 = QLabel("页间延迟 (秒)")
+        self.lbl_delay = QLabel(tr("label_delay"))
+        l2 = self.lbl_delay
         l2.setStyleSheet(f"color: {T.text_secondary}; background: transparent;")
         form.addWidget(l2)
         self.in_delay = GlassInput()
@@ -700,7 +1168,7 @@ class MainWindow(QMainWindow):
             idx = self.pdf_files.index(path)
             self.pdf_files.pop(idx)
             self._render_list()
-            self._log(f"已移除 {Path(path).name}")
+            self._log(tr("msg_removed", Path(path).name))
 
     def _on_drop(self, files):
         new_cnt = 0
@@ -710,7 +1178,7 @@ class MainWindow(QMainWindow):
                 new_cnt += 1
         if new_cnt:
             self._render_list()
-            self._log(f"添加了 {new_cnt} 个文件")
+            self._log(tr("msg_added_files", new_cnt))
             
     # Reorder logic needs to check actual item widgets or internal model if using standard drag
     # Problem: QListWidget internal drag drop might lose ItemWidget or re-instantiate items.
@@ -751,7 +1219,7 @@ class MainWindow(QMainWindow):
         platform_id = self.platform_combo.currentData()
         platform_name = self.platform_combo.currentText()
         
-        self._log(f"正在启动 {platform_name} 浏览器...", "info")
+        self._log(tr("msg_launching_browser", platform_name), "info")
         print(f"[DEBUG] _start_browser called for platform: {platform_id}")
         
         async def start():
@@ -770,9 +1238,9 @@ class MainWindow(QMainWindow):
                     # 检查是否有进度可以保留
                     has_progress = self.current_pdf_index > 0 or self.current_page_index > 0
                     if has_progress:
-                        self.sig_log.emit(f"浏览器已关闭 - 进度已保留 (PDF {self.current_pdf_index + 1}, 页 {self.current_page_index + 1})", "warning")
+                        self.sig_log.emit(tr("msg_browser_closed_progress", self.current_pdf_index + 1, self.current_page_index + 1), "warning")
                     else:
-                        self.sig_log.emit("浏览器已关闭", "warning")
+                        self.sig_log.emit(tr("msg_browser_closed"), "warning")
                     self.sig_enable_browser.emit(True)
                     self.sig_enable_start.emit(False)
                     self.sig_enable_stop.emit(False)  # 禁用停止按钮
@@ -787,14 +1255,14 @@ class MainWindow(QMainWindow):
                     self.bot.context.on("close", on_browser_close)
                 
                 # 使用信号进行跨线程 GUI 更新
-                self.sig_log.emit(f"{platform_name} 就绪 - 请登录", "success")
+                self.sig_log.emit(tr("msg_platform_ready", platform_name), "success")
                 self.sig_enable_start.emit(True)
                 print("[DEBUG] signals emitted")
             except Exception as e:
                 import traceback
                 print(f"[DEBUG] Exception in start(): {e}")
                 print(traceback.format_exc())
-                self.sig_log.emit(f"启动失败: {e}", "error")
+                self.sig_log.emit(tr("msg_launch_failed", str(e)), "error")
                 self.sig_enable_browser.emit(True)
                 # 重新启用平台选择
                 self.platform_combo.setEnabled(True)
@@ -812,120 +1280,318 @@ class MainWindow(QMainWindow):
         print("[DEBUG] _start_processing called")  # 调试日志
         
         if not self.pdf_files:
-            self._log("请先添加 PDF 文件", "warning")
+            self._log(tr("msg_add_pdf_first"), "warning")
             return
             
         if self.bot is None:
-            self._log("请先启动浏览器", "warning")
+            self._log(tr("msg_launch_browser_first"), "warning")
             return
         
         self.is_running = True
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         
-        # 检查是否是续传（有进度记录）
-        is_resume = self.current_pdf_index > 0 or self.current_page_index > 0
-        if is_resume:
-            self._log(f"继续处理 (从 PDF {self.current_pdf_index + 1}, 页 {self.current_page_index + 1})...", "info")
-        else:
-            self.p_bar.setValue(0)
-            self.p_lbl.setText("0%")
-            self.p_status.setText("准备中...")
-            self._log("开始处理...")
-        
         prompt = self.in_prompt.text()
         try: delay = float(self.in_delay.text())
         except: delay = 3.0
         
-        # 保存起始位置
-        start_pdf = self.current_pdf_index
-        start_page = self.current_page_index
+        # 检查是否是自动处理下一个PDF（批量处理中）
+        is_auto_next = getattr(self, '_is_auto_next_pdf', False)
+        if is_auto_next:
+            self._is_auto_next_pdf = False  # 重置标志
+            print(f"[DEBUG] 自动处理下一个 PDF: {self._current_preview_pdf}")
+            # 直接进入批量模式处理，跳过续传检测
+        else:
+            # 检查是否是续传模式：只有用户明确暂停后才是续传
+            is_resume = getattr(self, '_batch_was_paused', False) and len(self.all_page_images) > 0
+            
+            if is_resume:
+                print(f"[DEBUG] 续传模式: 继续处理 {self._current_preview_pdf}")
+                self._batch_was_paused = False  # 重置暂停标志
+            else:
+                # 非续传：始终从第一个 PDF 开始
+                print(f"[DEBUG] 从第一个 PDF 开始批量处理")
+                self._batch_was_paused = False
+                # 清空之前的预览状态
+                self.all_page_images = []
+                self.page_enabled = []
+                self.page_groups = []
+                self.custom_batch_order = None
+                self._current_preview_pdf = None
+                self.current_batch_index = 0  # 重置批次索引
+                
+                # 选中第一个 PDF 并开始处理
+                self.file_list.setCurrentRow(0)
+                self._auto_process_next_pdf = True
+                self._preview_pages()
+                return
         
-        async def process():
-            try:
-                total = len(self.pdf_files)
-                print(f"[DEBUG] 开始处理，共 {total} 个 PDF 文件")
-                print(f"[DEBUG] pdf_files = {self.pdf_files}")
-                print(f"[DEBUG] start_pdf={start_pdf}, start_page={start_page}")
+        # 续传模式：检查是否有预加载的页面
+        use_batch_mode = len(self.all_page_images) > 0
+        
+        if use_batch_mode:
+            # 多页批量模式
+            batches = self._get_page_batches()
+            if not batches:
+                self._log(tr("msg_no_enabled_pages"), "warning")
+                self._reset_ui()
+                return
                 
-                if total == 0:
-                    self.sig_log.emit("没有 PDF 文件需要处理", "warning")
+            # 检查是否是续传
+            start_batch = self.current_batch_index
+            is_resume = start_batch > 0
+            if is_resume:
+                self._log(tr("msg_resume_processing", start_batch + 1, len(batches)), "info")
+            else:
+                self.p_bar.setValue(0)
+                self.p_lbl.setText("0%")
+                self.p_status.setText(tr("msg_preparing"))
+                self._log(tr("msg_batch_processing", len(batches)))
+                
+            # 在开始处理前保存当前 PDF 索引（避免拖拽排序后路径匹配问题）
+            current_pdf_idx = self.file_list.currentRow()
+            print(f"[DEBUG] 开始处理 PDF 索引: {current_pdf_idx}, 总数: {len(self.pdf_files)}")
+            
+            async def process_batches():
+                try:
+                    total_batches = len(batches)
+                    print(f"[DEBUG] process_batches: 开始处理，总批次 = {total_batches}")
+                    
+                    for batch_idx in range(start_batch, total_batches):
+                        print(f"[DEBUG] process_batches: 处理批次 {batch_idx + 1}/{total_batches}, is_running = {self.is_running}")
+                        if not self.is_running:
+                            self.current_batch_index = batch_idx
+                            print(f"[DEBUG] process_batches: is_running 为 False，退出循环")
+                            break
+                            
+                        batch = batches[batch_idx]
+                        batch_size = len(batch)
+                        
+                        # 实时检查：跳过已禁用的页面
+                        if hasattr(self, 'preview_dialog') and self.preview_dialog:
+                            current_enabled = self.preview_dialog.page_preview.get_page_enabled_list()
+                            # 过滤掉已禁用的页面
+                            filtered_batch = []
+                            for img_path in batch:
+                                # 查找图片对应的页面索引
+                                if img_path in self.all_page_images:
+                                    idx = self.all_page_images.index(img_path)
+                                    if idx < len(current_enabled) and current_enabled[idx]:
+                                        filtered_batch.append(img_path)
+                            
+                            if not filtered_batch:
+                                # 该批次所有页面都被禁用，跳过
+                                self.sig_log.emit(f"批次 {batch_idx+1} 中的页面已被禁用，跳过", "info")
+                                continue
+                            batch = filtered_batch
+                            batch_size = len(batch)
+                        
+                        pct = int((batch_idx + 1) / total_batches * 100)
+                        if batch_size > 1:
+                            self.sig_progress.emit(pct, tr("msg_batch_progress", batch_idx+1, total_batches, batch_size))
+                        else:
+                            self.sig_progress.emit(pct, tr("msg_page_progress", batch_idx+1, total_batches))
+                        
+                        # 空白输出重试逻辑
+                        max_retries = config.EMPTY_RESPONSE_MAX_RETRIES
+                        retry_delay = config.EMPTY_RESPONSE_RETRY_DELAY
+                        retry_count = 0
+                        success = False
+                        
+                        while retry_count <= max_retries and not success:
+                            if not self.is_running:
+                                break
+                            
+                            try:
+                                if retry_count > 0:
+                                    self.sig_log.emit(tr("msg_retry", retry_count, max_retries, batch_idx+1), "warning")
+                                
+                                # 使用多图片上传方法
+                                await self.bot.upload_images_and_send(batch, prompt)
+                                response = await self.bot.wait_for_response_complete()
+                                
+                                # 检测空白输出
+                                if response is None or (isinstance(response, str) and response.strip() == ""):
+                                    retry_count += 1
+                                    if retry_count <= max_retries:
+                                        self.sig_log.emit(tr("msg_empty_response_retry", retry_delay), "warning")
+                                        await asyncio.sleep(retry_delay)
+                                        continue
+                                    else:
+                                        self.sig_log.emit(tr("msg_retry_failed", max_retries), "error")
+                                        success = True
+                                else:
+                                    success = True
+                                    self.current_batch_index = batch_idx + 1
+                                    
+                            except Exception as e:
+                                self.sig_log.emit(tr("msg_send_failed", str(e)), "error")
+                                retry_count += 1
+                                if retry_count <= max_retries:
+                                    self.sig_log.emit(tr("msg_wait_retry", retry_delay), "warning")
+                                    await asyncio.sleep(retry_delay)
+                                else:
+                                    self.sig_log.emit(tr("msg_retry_failed", max_retries), "error")
+                                    success = True
+                        
+                        if batch_idx < total_batches - 1 and self.is_running:
+                            await asyncio.sleep(delay)
+                    
+                    if self.is_running:
+                        self.current_batch_index = 0
+                        
+                        # 使用保存的 current_pdf_idx（在闭包中捕获）
+                        # 不再通过路径查找，避免拖拽排序后的索引问题
+                        print(f"[DEBUG] 处理完成，当前 PDF 索引: {current_pdf_idx}, 总数: {len(self.pdf_files)}")
+                        
+                        next_pdf_idx = current_pdf_idx + 1
+                        print(f"[DEBUG] 下一个 PDF 索引: {next_pdf_idx}")
+                        if next_pdf_idx < len(self.pdf_files):
+                            # 还有下一个 PDF，自动切换并处理
+                            self.sig_log.emit(f"当前 PDF 处理完成，准备处理下一个 ({next_pdf_idx + 1}/{len(self.pdf_files)})", "success")
+                            
+                            # 使用信号在主线程中处理（而不是 QTimer，因为我们在异步线程中）
+                            self.sig_process_next_pdf.emit(next_pdf_idx)
+                            return  # 不重置 UI，继续处理
+                        else:
+                            self.sig_progress.emit(100, tr("msg_complete"))
+                            self.sig_log.emit(tr("msg_all_complete"), "success")
                     self.sig_reset_ui.emit()
-                    return
-                
-                for i, pdf in enumerate(self.pdf_files):
-                    # 跳过已处理的 PDF
-                    if i < start_pdf:
-                        continue
                     
-                    if not self.is_running:
-                        # 保存当前进度
-                        self.current_pdf_index = i
-                        break
+                except Exception as e:
+                    import traceback
+                    print(traceback.format_exc())
+                    self.sig_log.emit(tr("msg_processing_error", str(e)), "error")
+                    self.sig_reset_ui.emit()
+            
+            self._run_async(process_batches())
+            
+        else:
+            # 传统模式：逐个 PDF 逐页处理
+            # 检查是否是续传（有进度记录）
+            is_resume = self.current_pdf_index > 0 or self.current_page_index > 0
+            if is_resume:
+                self._log(tr("msg_resume_legacy", self.current_pdf_index + 1, self.current_page_index + 1), "info")
+            else:
+                self.p_bar.setValue(0)
+                self.p_lbl.setText("0%")
+                self.p_status.setText(tr("msg_preparing"))
+                self._log(tr("msg_starting"))
+            
+            # 保存起始位置
+            start_pdf = self.current_pdf_index
+            start_page = self.current_page_index
+            
+            async def process():
+                try:
+                    total = len(self.pdf_files)
+                    print(f"[DEBUG] 开始处理，共 {total} 个 PDF 文件")
                     
-                    name = Path(pdf).name
-                    self.sig_log.emit(f"正在处理: {name} ({i+1}/{total})", "info")
+                    if total == 0:
+                        self.sig_log.emit(tr("msg_no_pdf_files"), "warning")
+                        self.sig_reset_ui.emit()
+                        return
                     
-                    # 转换 PDF
-                    try:
-                        from src.pdf_converter import convert_pdf_to_images
-                        images = convert_pdf_to_images(pdf)
-                        if not images:
-                            raise ValueError("未提取到图片")
-                    except Exception as e:
-                        self.sig_log.emit(f"转换失败: {e}", "error")
-                        continue
-                    
-                    # 确定起始页
-                    page_start = start_page if i == start_pdf else 0
-                    
-                    # 发送处理
-                    for j, img in enumerate(images):
-                        # 跳过已处理的页面
-                        if j < page_start:
+                    for i, pdf in enumerate(self.pdf_files):
+                        # 跳过已处理的 PDF
+                        if i < start_pdf:
                             continue
                         
                         if not self.is_running:
-                            # 保存当前进度
                             self.current_pdf_index = i
-                            self.current_page_index = j
                             break
                         
-                        pct = int((i/total + (j+1)/len(images)/total) * 100)
-                        self.sig_progress.emit(pct, f"{name} - p.{j+1}/{len(images)}")
+                        name = Path(pdf).name
+                        self.sig_log.emit(tr("msg_processing_pdf", name, i+1, total), "info")
                         
+                        # 转换 PDF
                         try:
-                            await self.bot.upload_image_and_send(img, prompt)
-                            await self.bot.wait_for_response_complete()
-                            # 记录已处理
-                            self.current_pdf_index = i
-                            self.current_page_index = j + 1
+                            from src.pdf_converter import convert_pdf_to_images
+                            images = convert_pdf_to_images(pdf)
+                            if not images:
+                                raise ValueError(tr("msg_no_images"))
                         except Exception as e:
-                            self.sig_log.emit(f"发送失败: {e}", "error")
+                            self.sig_log.emit(tr("msg_convert_failed", str(e)), "error")
+                            continue
                         
-                        if j < len(images) - 1: 
-                            await asyncio.sleep(delay)
+                        # 确定起始页
+                        page_start = start_page if i == start_pdf else 0
+                        
+                        # 发送处理
+                        for j, img in enumerate(images):
+                            if j < page_start:
+                                continue
+                            
+                            if not self.is_running:
+                                self.current_pdf_index = i
+                                self.current_page_index = j
+                                break
+                            
+                            pct = int((i/total + (j+1)/len(images)/total) * 100)
+                            self.sig_progress.emit(pct, f"{name} - p.{j+1}/{len(images)}")
+                            
+                            max_retries = config.EMPTY_RESPONSE_MAX_RETRIES
+                            retry_delay = config.EMPTY_RESPONSE_RETRY_DELAY
+                            retry_count = 0
+                            success = False
+                            
+                            while retry_count <= max_retries and not success:
+                                if not self.is_running:
+                                    break
+                                
+                                try:
+                                    if retry_count > 0:
+                                        self.sig_log.emit(tr("msg_retry_page", retry_count, max_retries, name, j+1), "warning")
+                                    
+                                    await self.bot.upload_images_and_send([img], prompt)
+                                    response = await self.bot.wait_for_response_complete()
+                                    
+                                    if response is None or (isinstance(response, str) and response.strip() == ""):
+                                        retry_count += 1
+                                        if retry_count <= max_retries:
+                                            self.sig_log.emit(tr("msg_empty_response_retry", retry_delay), "warning")
+                                            await asyncio.sleep(retry_delay)
+                                            continue
+                                        else:
+                                            self.sig_log.emit(tr("msg_retry_page_failed", max_retries), "error")
+                                            success = True
+                                    else:
+                                        success = True
+                                        self.current_pdf_index = i
+                                        self.current_page_index = j + 1
+                                        
+                                except Exception as e:
+                                    self.sig_log.emit(tr("msg_send_failed", str(e)), "error")
+                                    retry_count += 1
+                                    if retry_count <= max_retries:
+                                        self.sig_log.emit(tr("msg_wait_retry", retry_delay), "warning")
+                                        await asyncio.sleep(retry_delay)
+                                    else:
+                                        self.sig_log.emit(tr("msg_retry_page_failed", max_retries), "error")
+                                        success = True
+                            
+                            if j < len(images) - 1 and self.is_running: 
+                                await asyncio.sleep(delay)
+                        
+                        if self.is_running:
+                            self.current_page_index = 0
+                            self.current_pdf_index = i + 1
                     
-                    # 完成一个 PDF 后重置页面索引
                     if self.is_running:
+                        self.current_pdf_index = 0
                         self.current_page_index = 0
-                        self.current_pdf_index = i + 1
-                
-                if self.is_running:
-                    # 全部完成，重置进度
-                    self.current_pdf_index = 0
-                    self.current_page_index = 0
-                    self.sig_progress.emit(100, "完成")
-                    self.sig_log.emit("全部完成", "success")
-                self.sig_reset_ui.emit()
-                
-            except Exception as e:
-                import traceback
-                print(traceback.format_exc())
-                self.sig_log.emit(f"处理异常: {e}", "error")
-                self.sig_reset_ui.emit()
-        
-        self._run_async(process())
+                        self.sig_progress.emit(100, tr("msg_complete"))
+                        self.sig_log.emit(tr("msg_all_complete"), "success")
+                    self.sig_reset_ui.emit()
+                    
+                except Exception as e:
+                    import traceback
+                    print(traceback.format_exc())
+                    self.sig_log.emit(tr("msg_processing_error", str(e)), "error")
+                    self.sig_reset_ui.emit()
+            
+            self._run_async(process())
+
         
     def _upd_prog(self, val, txt):
         self.p_bar.setValue(val)
@@ -934,7 +1600,8 @@ class MainWindow(QMainWindow):
         
     def _stop(self):
         self.is_running = False
-        self._log(f"已暂停 (PDF {self.current_pdf_index + 1}, 页 {self.current_page_index + 1})", "warning")
+        self._batch_was_paused = True  # 标记用户暂停，下次可以续传
+        self._log(tr("msg_paused", self.current_pdf_index + 1, self.current_page_index + 1), "warning")
         self._reset_ui(keep_progress=True)
     
     def _clear_progress(self):
@@ -954,10 +1621,51 @@ class MainWindow(QMainWindow):
             # 任务完成时重置进度条
             self.p_bar.setValue(0)
             self.p_lbl.setText("0%")
-            self.p_status.setText("就绪")
+            self.p_status.setText(tr("msg_ready"))
         else:
             # 暂停时保留进度显示
-            self.p_status.setText("已暂停 - 点击开始继续")
+            self.p_status.setText(tr("msg_stopped"))
+    
+    def _toggle_language(self):
+        """切换语言"""
+        new_lang = toggle_language()
+        self._update_language()
+        
+    def _update_language(self):
+        """更新界面语言"""
+        lang = get_language()
+        # 更新语言按钮文本
+        self.btn_lang.setText("🌐 中" if lang == "en" else "🌐 EN")
+        
+        # 更新按钮文本
+        self.btn_browser.setText(tr("btn_launch_browser"))
+        self.btn_start.setText(tr("btn_start"))
+        self.btn_stop.setText(tr("btn_stop"))
+        self.btn_preview.setText(tr("btn_preview"))
+        
+        # 更新卡片标题 (通过 title_label)
+        if hasattr(self, 'card_doc_queue') and hasattr(self.card_doc_queue, 'title_label'):
+            self.card_doc_queue.title_label.setText(tr("card_doc_queue"))
+        if hasattr(self, 'progress_card') and hasattr(self.progress_card, 'title_label'):
+            self.progress_card.title_label.setText(tr("card_progress"))
+        if hasattr(self, 'settings_card') and hasattr(self.settings_card, 'title_label'):
+            self.settings_card.title_label.setText(tr("card_settings"))
+        
+        # 更新标签
+        if hasattr(self, 'lbl_prompt'):
+            self.lbl_prompt.setText(tr("label_prompt"))
+        if hasattr(self, 'lbl_delay'):
+            self.lbl_delay.setText(tr("label_delay"))
+        if hasattr(self, 'lbl_platform'):
+            self.lbl_platform.setText(tr("label_platform"))
+        
+        # 更新状态
+        if not self.is_running:
+            self.p_status.setText(tr("msg_ready"))
+        
+        # 更新页面预览弹窗
+        if hasattr(self, 'preview_dialog') and self.preview_dialog:
+            self.preview_dialog.update_language()
         
     def resizeEvent(self, e):
         super().resizeEvent(e)

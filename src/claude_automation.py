@@ -22,9 +22,8 @@ class ClaudeAutomation(BaseAIAutomation):
     PLATFORM_NAME = "Claude"
     PLATFORM_URL = "https://claude.ai/"
     
-    async def upload_image_and_send(self, image_path: str, prompt: str) -> None:
-        """上传图片并发送提示词 - 使用剪贴板粘贴方式"""
-        print(f"[Claude] 正在上传图片: {Path(image_path).name}")
+    async def upload_images_and_send(self, image_paths: list, prompt: str) -> None:
+        """上传一张或多张图片并发送提示词 - 使用剪贴板粘贴方式"""
         
         # Step 1: 查找并聚焦输入区域
         input_selectors = [
@@ -51,17 +50,22 @@ class ClaudeAutomation(BaseAIAutomation):
         if not input_area:
             raise Exception("找不到输入区域")
         
-        # Step 2: 使用剪贴板粘贴图片
-        print("[Claude] 使用剪贴板粘贴方式...")
+        # Step 2: 依次上传所有图片
+        for image_path in image_paths:
+            print(f"[Claude] 正在上传图片: {Path(image_path).name}")
+            
+            try:
+                await self._paste_image_from_clipboard(input_area, image_path)
+                print("[Claude] 图片粘贴成功 ✓")
+            except Exception as e:
+                print(f"[Claude] 剪贴板方式失败: {e}")
+                await self._try_file_input_upload(image_path)
+            
+            await asyncio.sleep(1)
         
-        try:
-            await self._paste_image_from_clipboard(input_area, image_path)
-            print("[Claude] 图片粘贴成功 ✓")
-        except Exception as e:
-            print(f"[Claude] 剪贴板方式失败: {e}")
-            await self._try_file_input_upload(image_path)
-        
-        await asyncio.sleep(2)
+        # 等待所有图片上传完成
+        if len(image_paths) > 1:
+            await asyncio.sleep(2)
         
         # Step 3: 输入提示词
         print("[Claude] 正在输入提示词...")

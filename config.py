@@ -28,6 +28,10 @@ PDF_DPI = 200
 # 每次发送后的等待时间（秒）
 DELAY_BETWEEN_PAGES = 3
 
+# 空白输出重试配置
+EMPTY_RESPONSE_MAX_RETRIES = 3  # 空白输出时最大重试次数
+EMPTY_RESPONSE_RETRY_DELAY = 3  # 重试前等待时间（秒）
+
 # 确保目录存在
 OUTPUT_DIR.mkdir(exist_ok=True)
 BROWSER_DATA_DIR.mkdir(exist_ok=True)

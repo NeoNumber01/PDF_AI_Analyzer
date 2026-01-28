@@ -174,15 +174,25 @@ class BaseAIAutomation(ABC):
         return None
     
     @abstractmethod
+    async def upload_images_and_send(self, image_paths: list, prompt: str) -> None:
+        """
+        上传一张或多张图片并发送提示词
+        
+        Args:
+            image_paths: 图片文件路径列表（可以是1张或多张）
+            prompt: 提示词文本
+        """
+        pass
+    
     async def upload_image_and_send(self, image_path: str, prompt: str) -> None:
         """
-        上传图片并发送提示词
+        上传单张图片并发送提示词（兼容旧接口）
         
         Args:
             image_path: 图片文件路径
             prompt: 提示词文本
         """
-        pass
+        await self.upload_images_and_send([image_path], prompt)
     
     @abstractmethod
     async def wait_for_response_complete(self, timeout_ms: int = None) -> str:

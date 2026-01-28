@@ -41,7 +41,7 @@ output/
 
 # PyInstaller
 *.manifest
-*.spec
+# *.spec  # 保留 PyInstaller spec 文件作为项目配置
 
 # Logs
 *.log

@@ -22,9 +22,8 @@ class GeminiAutomation(BaseAIAutomation):
     PLATFORM_NAME = "Google Gemini"
     PLATFORM_URL = "https://gemini.google.com/app"
     
-    async def upload_image_and_send(self, image_path: str, prompt: str) -> None:
-        """上传图片并发送提示词 - 使用剪贴板粘贴方式"""
-        print(f"[Gemini] 正在上传图片: {Path(image_path).name}")
+    async def upload_images_and_send(self, image_paths: list, prompt: str) -> None:
+        """上传一张或多张图片并发送提示词 - 使用剪贴板粘贴方式"""
         
         # Step 1: 查找并聚焦输入区域
         input_selectors = [
@@ -51,88 +50,89 @@ class GeminiAutomation(BaseAIAutomation):
         if not input_area:
             raise Exception("找不到输入区域")
         
-        # Step 2: 读取图片并转为 base64，通过剪贴板粘贴
-        print("[Gemini] 使用剪贴板粘贴方式...")
-        
-        try:
-            # 读取图片文件
-            with open(image_path, 'rb') as f:
-                image_data = f.read()
+        # Step 2: 依次上传所有图片
+        for image_path in image_paths:
+            print(f"[Gemini] 正在上传图片: {Path(image_path).name}")
             
-            # 获取图片 MIME 类型
-            image_ext = Path(image_path).suffix.lower()
-            mime_types = {
-                '.png': 'image/png',
-                '.jpg': 'image/jpeg',
-                '.jpeg': 'image/jpeg',
-                '.gif': 'image/gif',
-                '.webp': 'image/webp',
-            }
-            mime_type = mime_types.get(image_ext, 'image/png')
-            
-            # 转为 base64
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            
-            # 使用 JavaScript 创建 ClipboardItem 并粘贴
-            # 注意：需要将 base64 数据转换回 blob
-            paste_script = f'''
-                async () => {{
-                    try {{
-                        // 将 base64 转换为 blob
-                        const base64 = "{image_base64}";
-                        const mimeType = "{mime_type}";
-                        
-                        const byteCharacters = atob(base64);
-                        const byteNumbers = new Array(byteCharacters.length);
-                        for (let i = 0; i < byteCharacters.length; i++) {{
-                            byteNumbers[i] = byteCharacters.charCodeAt(i);
-                        }}
-                        const byteArray = new Uint8Array(byteNumbers);
-                        const blob = new Blob([byteArray], {{ type: mimeType }});
-                        
-                        // 创建 ClipboardItem
-                        const clipboardItem = new ClipboardItem({{
-                            [mimeType]: blob
-                        }});
-                        
-                        // 写入剪贴板
-                        await navigator.clipboard.write([clipboardItem]);
-                        console.log('Image copied to clipboard');
-                        return true;
-                    }} catch (e) {{
-                        console.error('Clipboard write failed:', e);
-                        return false;
-                    }}
-                }}
-            '''
-            
-            clipboard_success = await self.page.evaluate(paste_script)
-            
-            if clipboard_success:
-                # 聚焦输入框并粘贴
-                await input_area.click()
-                await asyncio.sleep(0.3)
-                
-                # 使用 Ctrl+V 粘贴
-                await self.page.keyboard.press('Control+v')
-                await asyncio.sleep(2)  # 等待图片加载
-                
-                print("[Gemini] 图片粘贴成功 ✓")
-            else:
-                raise Exception("剪贴板写入失败")
-                
-        except Exception as e:
-            print(f"[Gemini] 剪贴板方式失败: {e}")
-            
-            # 备用方法：使用 DataTransfer 模拟拖放
-            print("[Gemini] 尝试使用 DataTransfer 方式...")
             try:
-                await self._upload_via_datatransfer(input_area, image_path)
-            except Exception as e2:
-                print(f"[Gemini] DataTransfer 方式也失败: {e2}")
-                raise Exception(f"所有上传方式都失败")
+                # 读取图片文件
+                with open(image_path, 'rb') as f:
+                    image_data = f.read()
+                
+                # 获取图片 MIME 类型
+                image_ext = Path(image_path).suffix.lower()
+                mime_types = {
+                    '.png': 'image/png',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp',
+                }
+                mime_type = mime_types.get(image_ext, 'image/png')
+                
+                # 转为 base64
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                
+                # 使用 JavaScript 创建 ClipboardItem 并粘贴
+                paste_script = f'''
+                    async () => {{
+                        try {{
+                            const base64 = "{image_base64}";
+                            const mimeType = "{mime_type}";
+                            
+                            const byteCharacters = atob(base64);
+                            const byteNumbers = new Array(byteCharacters.length);
+                            for (let i = 0; i < byteCharacters.length; i++) {{
+                                byteNumbers[i] = byteCharacters.charCodeAt(i);
+                            }}
+                            const byteArray = new Uint8Array(byteNumbers);
+                            const blob = new Blob([byteArray], {{ type: mimeType }});
+                            
+                            const clipboardItem = new ClipboardItem({{
+                                [mimeType]: blob
+                            }});
+                            
+                            await navigator.clipboard.write([clipboardItem]);
+                            console.log('Image copied to clipboard');
+                            return true;
+                        }} catch (e) {{
+                            console.error('Clipboard write failed:', e);
+                            return false;
+                        }}
+                    }}
+                '''
+                
+                clipboard_success = await self.page.evaluate(paste_script)
+                
+                if clipboard_success:
+                    # 聚焦输入框并粘贴
+                    await input_area.click()
+                    await asyncio.sleep(0.3)
+                    
+                    # 使用 Ctrl+V 粘贴
+                    await self.page.keyboard.press('Control+v')
+                    await asyncio.sleep(2)  # 等待图片加载
+                    
+                    print(f"[Gemini] 图片粘贴成功 ✓")
+                else:
+                    raise Exception("剪贴板写入失败")
+                    
+            except Exception as e:
+                print(f"[Gemini] 剪贴板方式失败: {e}")
+                
+                # 备用方法：使用 DataTransfer 模拟拖放
+                print("[Gemini] 尝试使用 DataTransfer 方式...")
+                try:
+                    await self._upload_via_datatransfer(input_area, image_path)
+                except Exception as e2:
+                    print(f"[Gemini] DataTransfer 方式也失败: {e2}")
+                    raise Exception(f"所有上传方式都失败")
+            
+            await asyncio.sleep(1)
         
-        await asyncio.sleep(2)
+        # 等待所有图片上传完成
+        if len(image_paths) > 1:
+            await asyncio.sleep(2)
         
         # Step 3: 输入提示词
         print("[Gemini] 正在输入提示词...")
