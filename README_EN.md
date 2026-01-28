@@ -148,6 +148,104 @@ flowchart LR
 
 ---
 
+## 📖 User Guide
+
+### Interface Overview
+
+The program interface is divided into the following areas:
+
+| Area | Function |
+|------|----------|
+| **Platform Selection** | Dropdown to select AI platform (ChatGPT/Claude/Gemini/DeepSeek) |
+| **Browser Control** | Start/Close browser buttons |
+| **Prompt Input** | Edit prompt text to send to AI |
+| **PDF List** | Display added PDF files |
+| **Control Buttons** | Add PDF, Preview, Start/Pause/Stop |
+| **Status Bar** | Display current processing status and progress |
+| **Language Switch** | Toggle between Chinese/English interface |
+
+### Step-by-Step Instructions
+
+#### Step 1: Start Browser and Login
+
+1. Select the AI platform you want to use at the top
+2. Click the **"Start Browser"** button
+3. Browser window will open and navigate to the selected platform
+4. **First time**: Please manually log in to your account in the browser
+5. After successful login, status bar will show "Browser ready"
+
+> 💡 **Tip**: Login state is automatically saved, no need to re-login next time.
+
+#### Step 2: Add PDF Files
+
+1. Click the **"Add PDF"** button
+2. Select one or more PDF files in the file dialog
+3. Selected files will appear in the PDF list
+4. You can continue adding more files
+
+**Batch Adding**:
+- Hold `Ctrl` and click to select multiple files
+- Hold `Shift` and click to select a continuous range
+
+#### Step 3: Preview and Configure Pages (Optional)
+
+1. Select a file in the PDF list
+2. Click **"Preview"** button to open the preview window
+3. In the preview window you can:
+
+| Action | Description |
+|--------|-------------|
+| **Check/Uncheck** | Enable or disable a page |
+| **Ctrl+Click** | Multi-select pages |
+| **Create Group** | Select multiple pages and click "Create Group" to send them together |
+| **Adjust Order** | Drag or use up/down buttons |
+| **Input Order** | Customize processing order (e.g., 3,1,2,5) |
+| **Double-click** | View high-resolution image |
+
+#### Step 4: Edit Prompt
+
+1. Edit the prompt text in the input box
+2. Default prompt: "Please explain this image in detail."
+3. Modify as needed for your use case
+
+**Prompt Examples**:
+```
+Please analyze all formulas in this image and explain the derivation step by step.
+```
+
+#### Step 5: Start Processing
+
+1. Make sure browser is started and logged in
+2. Make sure at least one PDF file is added
+3. Click the **"Start"** button
+4. The program will automatically:
+   - Convert PDF pages to images
+   - Upload each page (or group) to the AI platform
+   - Send prompt and wait for response
+   - Process next page/group
+
+#### Step 6: Pause and Resume
+
+- **Pause**: Click **"Pause"** button, processing will pause after current page completes
+- **Resume**: Click **"Resume"** button to continue from where you left off
+- **Stop**: Click **"Stop"** button to completely terminate processing
+
+### Keyboard Shortcuts
+
+| Shortcut | Function |
+|----------|----------|
+| `Ctrl+Click` | Multi-select pages |
+| `Shift+Click` | Select continuous range |
+| `Double-click` | View full image |
+| `Ctrl+Scroll` | Zoom in image viewer |
+
+### Important Notes
+
+1. **Don't manually operate the browser**: Avoid interacting with the browser during processing
+2. **Keep network stable**: AI responses require a stable internet connection
+3. **Be patient**: Complex image analysis may take some time
+4. **Check output**: After completion, review all responses in the AI platform chat
+
 ## 📑 Advanced Features
 
 ### Page Grouping Modes
