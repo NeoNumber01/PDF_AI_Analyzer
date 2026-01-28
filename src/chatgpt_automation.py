@@ -61,6 +61,10 @@ class ChatGPTAutomation(BaseAIAutomation):
             image_paths: 图片文件路径列表
             prompt: 提示词文本
         """
+        # 记录发送前的消息数量，用于后续检测空白回复
+        self._initial_message_count = await self._get_message_count()
+        print(f"[ChatGPT] 发送前消息数量: {self._initial_message_count}")
+        
         # 依次上传所有图片
         for image_path in image_paths:
             print(f"[ChatGPT] 正在上传图片: {Path(image_path).name}")
@@ -155,10 +159,52 @@ class ChatGPTAutomation(BaseAIAutomation):
             messages = self.page.locator('[data-message-author-role="assistant"]')
             count = await messages.count()
             if count > 0:
-                return await messages.last.text_content()
+                content = await messages.last.text_content()
+                return content if content else ""
         except:
             pass
         return ""
+    
+    async def _get_message_count(self) -> int:
+        """获取当前 AI 回复的数量"""
+        try:
+            messages = self.page.locator('[data-message-author-role="assistant"]')
+            return await messages.count()
+        except:
+            return 0
+    
+    async def _detect_empty_response(self, initial_count: int) -> bool:
+        """
+        检测是否为空白回复
+        
+        Args:
+            initial_count: 发送消息前的 AI 回复数量
+        
+        Returns:
+            True 如果检测到空白回复
+        """
+        try:
+            messages = self.page.locator('[data-message-author-role="assistant"]')
+            current_count = await messages.count()
+            
+            # 如果有新回复产生
+            if current_count > initial_count:
+                # 获取最新回复的内容
+                last_message = messages.last
+                content = await last_message.text_content()
+                
+                if content is None or content.strip() == "":
+                    print("[ChatGPT] 检测到空白回复")
+                    return True
+            else:
+                # 没有新回复产生，可能是发送失败
+                print("[ChatGPT] 警告：没有检测到新回复")
+                return True
+                
+            return False
+        except Exception as e:
+            print(f"[ChatGPT] 检测回复时出错: {e}")
+            return True
 
 
 async def test():

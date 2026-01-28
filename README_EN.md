@@ -242,9 +242,10 @@ Please analyze all formulas in this image and explain the derivation step by ste
 ### Important Notes
 
 1. **Don't manually operate the browser**: Avoid interacting with the browser during processing
-2. **Keep network stable**: AI responses require a stable internet connection
-3. **Be patient**: Complex image analysis may take some time
-4. **Check output**: After completion, review all responses in the AI platform chat
+2. **Don't modify settings during processing**: Once processing starts, avoid changing the document queue, groups, or sorting settings
+3. **Keep network stable**: AI responses require a stable internet connection
+4. **Be patient**: Complex image analysis may take some time
+5. **Check output**: After completion, review all responses in the AI platform chat
 
 ## 📑 Advanced Features
 

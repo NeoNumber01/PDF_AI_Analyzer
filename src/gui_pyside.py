@@ -806,6 +806,12 @@ class MainWindow(QMainWindow):
             self._log(tr("msg_add_pdf_first"), "warning")
             return
         
+        # 重要：在切换到新PDF前，先保存当前PDF的状态
+        # 这确保每个PDF的分组和顺序是独立的
+        if hasattr(self, '_current_preview_pdf') and self._current_preview_pdf:
+            self._save_current_pdf_state()
+            print(f"[DEBUG] _preview_pages: 已保存 {self._current_preview_pdf} 的状态")
+        
         # 获取当前选中的 PDF
         current_row = self.file_list.currentRow()
         if current_row < 0:
@@ -878,6 +884,9 @@ class MainWindow(QMainWindow):
             self._auto_process_next_pdf = False
             self._is_auto_next_pdf = True  # 标记为自动处理下一个PDF，不是续传
             print(f"[DEBUG] _load_preview_images: 自动开始处理下一个 PDF")
+            print(f"[DEBUG] 当前 PDF: {self._current_preview_pdf}")
+            print(f"[DEBUG] all_page_images 数量: {len(self.all_page_images)}")
+            print(f"[DEBUG] page_enabled 数量: {len(self.page_enabled)}, 启用: {sum(self.page_enabled)}")
             # 延迟一下再开始处理
             from PySide6.QtCore import QTimer
             QTimer.singleShot(500, self._start_processing)
@@ -895,9 +904,23 @@ class MainWindow(QMainWindow):
         if current_row >= 0 and current_row < len(self.pdf_files):
             self._current_preview_pdf = self.pdf_files[current_row]
         
+        print(f"[DEBUG] _load_preview_from_cache: 加载 {self._current_preview_pdf}")
         print(f"[DEBUG] _load_preview_from_cache: page_groups = {self.page_groups}")
         
-        # 只加载页面缩略图（不清空分组）
+        # 重要：先完全清空所有组件的状态，避免跨PDF状态污染
+        # 清空 PagePreviewPanel 的分组状态
+        self.preview_dialog.page_preview.custom_groups.clear()
+        self.preview_dialog.page_preview.next_group_id = 0
+        self.preview_dialog.page_preview.selected_indices.clear()
+        
+        # 清空 GroupManagerPanel 的分组状态
+        self.preview_dialog.group_manager_panel.groups.clear()
+        self.preview_dialog.group_manager_panel.next_group_id = 0
+        
+        # 清空自定义批次顺序
+        self.preview_dialog.custom_batch_order = None
+        
+        # 加载页面缩略图
         self.preview_dialog.page_preview.load_pages(self.all_page_images)
         
         # 设置 GroupManagerPanel 的页面数据
@@ -955,6 +978,10 @@ class MainWindow(QMainWindow):
             self._auto_process_next_pdf = False
             self._is_auto_next_pdf = True  # 标记为自动处理模式，防止 _start_processing 进入循环
             print(f"[DEBUG] _load_preview_from_cache: 自动开始处理下一个 PDF")
+            print(f"[DEBUG] 当前 PDF: {self._current_preview_pdf}")
+            print(f"[DEBUG] all_page_images 数量: {len(self.all_page_images)}")
+            print(f"[DEBUG] page_enabled 数量: {len(self.page_enabled)}, 启用: {sum(self.page_enabled)}")
+            print(f"[DEBUG] custom_batch_order: {self.custom_batch_order is not None}")
             # 延迟一下再开始处理
             from PySide6.QtCore import QTimer
             QTimer.singleShot(500, self._start_processing)
@@ -1015,8 +1042,18 @@ class MainWindow(QMainWindow):
         Returns:
             list of lists: [[img1, img2], [img3], ...] 每个子列表是一批要一起发送的图片
         """
-        # 获取启用的页面索引 - 优先从预览弹窗获取实时数据
-        if hasattr(self, 'preview_dialog') and self.preview_dialog:
+        # 获取启用的页面索引
+        # 重要：在批量自动处理模式下，preview_dialog 的状态可能还没有同步到新 PDF
+        # 因此优先使用 MainWindow 自身的 page_enabled 和 page_groups（这些在 _preview_pages 中已正确设置）
+        is_auto_mode = getattr(self, '_is_auto_next_pdf', False) or getattr(self, '_auto_process_next_pdf', False)
+        
+        if is_auto_mode:
+            # 自动批量处理模式：使用 MainWindow 的数据（已在 _preview_pages 或 _load_preview_from_cache 中设置）
+            page_enabled = self.page_enabled
+            page_groups = self.page_groups
+            print(f"[DEBUG] _get_page_batches: 自动批量模式，使用 MainWindow 数据")
+        elif hasattr(self, 'preview_dialog') and self.preview_dialog:
+            # 手动模式：从预览弹窗获取实时数据
             page_enabled = self.preview_dialog.page_preview.get_page_enabled_list()
             page_groups = self.preview_dialog.group_manager_panel.get_groups_list()
             print(f"[DEBUG] _get_page_batches: 从预览弹窗获取实时数据")
@@ -1350,7 +1387,11 @@ class MainWindow(QMainWindow):
                 
             # 在开始处理前保存当前 PDF 索引（避免拖拽排序后路径匹配问题）
             current_pdf_idx = self.file_list.currentRow()
+            # 重要：捕获当前 PDF 的图片列表副本，避免异步处理过程中被其他 PDF 数据污染
+            current_all_page_images = self.all_page_images.copy()
+            current_page_enabled = self.page_enabled.copy()
             print(f"[DEBUG] 开始处理 PDF 索引: {current_pdf_idx}, 总数: {len(self.pdf_files)}")
+            print(f"[DEBUG] 捕获的图片数: {len(current_all_page_images)}, 启用页数: {sum(current_page_enabled)}")
             
             async def process_batches():
                 try:
@@ -1368,23 +1409,29 @@ class MainWindow(QMainWindow):
                         batch_size = len(batch)
                         
                         # 实时检查：跳过已禁用的页面
-                        if hasattr(self, 'preview_dialog') and self.preview_dialog:
+                        # 注意：在自动批量处理模式下，跳过此检查，因为 preview_dialog 的状态可能已被更新为其他 PDF 的数据
+                        is_auto_mode = getattr(self, '_is_auto_next_pdf', False)
+                        if not is_auto_mode and hasattr(self, 'preview_dialog') and self.preview_dialog:
                             current_enabled = self.preview_dialog.page_preview.get_page_enabled_list()
-                            # 过滤掉已禁用的页面
-                            filtered_batch = []
-                            for img_path in batch:
-                                # 查找图片对应的页面索引
-                                if img_path in self.all_page_images:
-                                    idx = self.all_page_images.index(img_path)
-                                    if idx < len(current_enabled) and current_enabled[idx]:
-                                        filtered_batch.append(img_path)
-                            
-                            if not filtered_batch:
-                                # 该批次所有页面都被禁用，跳过
-                                self.sig_log.emit(f"批次 {batch_idx+1} 中的页面已被禁用，跳过", "info")
-                                continue
-                            batch = filtered_batch
-                            batch_size = len(batch)
+                            # 验证数据一致性：确保页数匹配（使用闭包捕获的图片列表）
+                            if len(current_enabled) == len(current_all_page_images):
+                                # 过滤掉已禁用的页面
+                                filtered_batch = []
+                                for img_path in batch:
+                                    # 查找图片对应的页面索引（使用闭包捕获的图片列表）
+                                    if img_path in current_all_page_images:
+                                        idx = current_all_page_images.index(img_path)
+                                        if idx < len(current_enabled) and current_enabled[idx]:
+                                            filtered_batch.append(img_path)
+                                
+                                if not filtered_batch:
+                                    # 该批次所有页面都被禁用，跳过
+                                    self.sig_log.emit(f"批次 {batch_idx+1} 中的页面已被禁用，跳过", "info")
+                                    continue
+                                batch = filtered_batch
+                                batch_size = len(batch)
+                            else:
+                                print(f"[DEBUG] 跳过实时检查：页数不匹配 (dialog: {len(current_enabled)}, captured: {len(current_all_page_images)})")
                         
                         pct = int((batch_idx + 1) / total_batches * 100)
                         if batch_size > 1:
@@ -1410,9 +1457,18 @@ class MainWindow(QMainWindow):
                                 await self.bot.upload_images_and_send(batch, prompt)
                                 response = await self.bot.wait_for_response_complete()
                                 
-                                # 检测空白输出
+                                # 检测空白输出 - 使用改进的检测方法
+                                is_empty = False
                                 if response is None or (isinstance(response, str) and response.strip() == ""):
+                                    is_empty = True
+                                
+                                # 如果有 _detect_empty_response 方法（ChatGPT），使用更精确的检测
+                                if hasattr(self.bot, '_detect_empty_response') and hasattr(self.bot, '_initial_message_count'):
+                                    is_empty = await self.bot._detect_empty_response(self.bot._initial_message_count)
+                                
+                                if is_empty:
                                     retry_count += 1
+                                    self.sig_log.emit(f"[空白检测] 检测到空白输出 (重试 {retry_count}/{max_retries})", "warning")
                                     if retry_count <= max_retries:
                                         self.sig_log.emit(tr("msg_empty_response_retry", retry_delay), "warning")
                                         await asyncio.sleep(retry_delay)
@@ -1436,6 +1492,9 @@ class MainWindow(QMainWindow):
                         
                         if batch_idx < total_batches - 1 and self.is_running:
                             await asyncio.sleep(delay)
+                    
+                    # 批次循环结束后的调试信息
+                    print(f"[DEBUG] 批次循环结束: 共处理 {total_batches} 批次, is_running={self.is_running}")
                     
                     if self.is_running:
                         self.current_batch_index = 0
@@ -1546,8 +1605,18 @@ class MainWindow(QMainWindow):
                                     await self.bot.upload_images_and_send([img], prompt)
                                     response = await self.bot.wait_for_response_complete()
                                     
+                                    # 检测空白输出 - 使用改进的检测方法
+                                    is_empty = False
                                     if response is None or (isinstance(response, str) and response.strip() == ""):
+                                        is_empty = True
+                                    
+                                    # 如果有 _detect_empty_response 方法（ChatGPT），使用更精确的检测
+                                    if hasattr(self.bot, '_detect_empty_response') and hasattr(self.bot, '_initial_message_count'):
+                                        is_empty = await self.bot._detect_empty_response(self.bot._initial_message_count)
+                                    
+                                    if is_empty:
                                         retry_count += 1
+                                        self.sig_log.emit(f"[空白检测] 检测到空白输出 (重试 {retry_count}/{max_retries})", "warning")
                                         if retry_count <= max_retries:
                                             self.sig_log.emit(tr("msg_empty_response_retry", retry_delay), "warning")
                                             await asyncio.sleep(retry_delay)

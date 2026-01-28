@@ -1103,6 +1103,10 @@ class PagePreviewPanel(QWidget):
         self.page_order.clear()
         self.selected_indices.clear()
         
+        # 重要：同时清除分组状态，确保每个PDF的分组独立
+        self.custom_groups.clear()
+        self.next_group_id = 0
+        
         # 清除布局中的所有项
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -1706,10 +1710,11 @@ class PagePreviewDialog(QDialog):
         self.group_manager_panel.set_pages(pages_dict)
         self.group_manager_panel.clear_groups()
         
-        # 连接页数变化时更新预览
-        self.group_manager.pages_per_batch_changed.connect(
-            lambda _: self.group_manager.update_preview(len(image_paths))
-        )
+        # 重要：清除自定义批次顺序，确保每个PDF的顺序独立
+        self.custom_batch_order = None
+        
+        # 注意：不重复连接信号（避免重复触发）
+        # 页数变化时更新预览已在 __init__ 或首次加载时连接
         
     def _on_preview_groups_changed(self, groups: list):
         """当页面预览面板的分组变化时，同步到分组管理面板"""

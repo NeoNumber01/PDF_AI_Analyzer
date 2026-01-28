@@ -101,7 +101,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
-          Compress-Archive -Path "dist/PDF_AI_Analyzer/*" -DestinationPath "${{ matrix.artifact_name }}.zip"
+          Compress-Archive -Path "dist/PDF_AI_Analyzer" -DestinationPath "${{ matrix.artifact_name }}.zip"
 
       - name: Create archive (macOS)
         if: matrix.os == 'macos-latest'
