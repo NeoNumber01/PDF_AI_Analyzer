@@ -128,6 +128,15 @@ translations = {
         "btn_cancel": "取消",
         "btn_batch_order": "输入顺序",
         
+        # 新建聊天设置
+        "label_new_chat_settings": "💬 聊天窗口设置",
+        "label_new_chat_per_pdf": "每个PDF新建聊天",
+        "label_new_chat_per_pages": "每N页新建聊天",
+        "label_pages_suffix": "页",
+        "msg_creating_new_chat": "正在创建新聊天窗口...",
+        "msg_new_chat_created": "新聊天窗口已创建",
+        "msg_new_chat_failed": "创建新聊天窗口失败: {}",
+        
         # 语言
         "language": "语言",
     },
@@ -251,6 +260,15 @@ translations = {
         "btn_confirm": "Confirm",
         "btn_cancel": "Cancel",
         "btn_batch_order": "Input Order",
+        
+        # New chat settings
+        "label_new_chat_settings": "💬 Chat Window Settings",
+        "label_new_chat_per_pdf": "New chat per PDF",
+        "label_new_chat_per_pages": "New chat every N pages",
+        "label_pages_suffix": "pages",
+        "msg_creating_new_chat": "Creating new chat window...",
+        "msg_new_chat_created": "New chat window created",
+        "msg_new_chat_failed": "Failed to create new chat: {}",
         
         # Language
         "language": "Language",

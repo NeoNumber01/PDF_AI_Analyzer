@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QFrame, QGraphicsDropShadowEffect, QFileDialog, QMessageBox, QSizePolicy,
-    QComboBox
+    QComboBox, QCheckBox
 )
 from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QRectF, QMimeData, QUrl
 from PySide6.QtGui import (
@@ -491,6 +491,12 @@ class MainWindow(QMainWindow):
         # PDF 文件状态缓存 - 保存每个文件的处理状态
         # {pdf_path: {'images': [...], 'enabled': [...], 'groups': [...], 'mode': str, 'pages_per_batch': int}}
         self.pdf_cache = {}
+        
+        # 新建聊天设置
+        self.new_chat_per_pdf = False      # 每PDF新建聊天 (默认关闭)
+        self.new_chat_per_pages = False    # 每N页新建聊天 (默认关闭)
+        self.new_chat_pages_threshold = 30  # 每N页阈值 (默认30页)
+        self.pages_since_last_new_chat = 0  # 上次新建聊天后处理的页数
         
         # 创建持久的事件循环 (在单独线程中运行)
         self._loop = asyncio.new_event_loop()
@@ -1166,6 +1172,78 @@ class MainWindow(QMainWindow):
         self.in_delay.setText(str(config.DELAY_BETWEEN_PAGES))
         self.in_delay.setFixedWidth(100)
         form.addWidget(self.in_delay)
+        
+        # 分割线
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"background: {T.divider}; margin-top: 10px; margin-bottom: 5px;")
+        divider.setFixedHeight(1)
+        form.addWidget(divider)
+        
+        # 聊天窗口设置标题 (显眼的蓝色)
+        self.lbl_new_chat_settings = QLabel(tr("label_new_chat_settings"))
+        self.lbl_new_chat_settings.setStyleSheet(f"""
+            color: {T.accent}; 
+            font-weight: bold;
+            font-size: 14px;
+            background: transparent;
+            padding-top: 8px;
+        """)
+        form.addWidget(self.lbl_new_chat_settings)
+        
+        # 每PDF新建聊天开关
+        self.cb_new_chat_pdf = QCheckBox(tr("label_new_chat_per_pdf"))
+        self.cb_new_chat_pdf.setChecked(False)  # 默认关闭
+        self.cb_new_chat_pdf.setStyleSheet(f"""
+            QCheckBox {{
+                color: {T.text_primary};
+                font-size: 13px;
+                background: transparent;
+                padding: 4px 0;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+            }}
+        """)
+        self.cb_new_chat_pdf.toggled.connect(self._on_new_chat_pdf_toggled)
+        form.addWidget(self.cb_new_chat_pdf)
+        
+        # 每N页新建聊天开关 + 输入框
+        pages_layout = QHBoxLayout()
+        pages_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.cb_new_chat_pages = QCheckBox(tr("label_new_chat_per_pages"))
+        self.cb_new_chat_pages.setChecked(False)  # 默认关闭
+        self.cb_new_chat_pages.setStyleSheet(f"""
+            QCheckBox {{
+                color: {T.text_primary};
+                font-size: 13px;
+                background: transparent;
+                padding: 4px 0;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+            }}
+        """)
+        self.cb_new_chat_pages.toggled.connect(self._on_new_chat_pages_toggled)
+        pages_layout.addWidget(self.cb_new_chat_pages)
+        
+        self.in_pages_threshold = GlassInput()
+        self.in_pages_threshold.setText("30")
+        self.in_pages_threshold.setFixedWidth(60)
+        self.in_pages_threshold.setEnabled(False)  # 初始禁用
+        self.in_pages_threshold.textChanged.connect(self._on_pages_threshold_changed)
+        pages_layout.addWidget(self.in_pages_threshold)
+        
+        self.lbl_pages_suffix = QLabel(tr("label_pages_suffix"))
+        self.lbl_pages_suffix.setStyleSheet(f"color: {T.text_secondary}; background: transparent;")
+        pages_layout.addWidget(self.lbl_pages_suffix)
+        pages_layout.addStretch()
+        
+        form.addLayout(pages_layout)
+        
         settings_card.addLayout(form)
         space.addWidget(settings_card)
         
@@ -1247,6 +1325,26 @@ class MainWindow(QMainWindow):
     def _clear(self):
         self.pdf_files = []
         self._render_list()
+    
+    # 新建聊天设置事件处理
+    def _on_new_chat_pdf_toggled(self, checked: bool):
+        """每PDF新建聊天开关变化"""
+        self.new_chat_per_pdf = checked
+        print(f"[DEBUG] new_chat_per_pdf = {checked}")
+        
+    def _on_new_chat_pages_toggled(self, checked: bool):
+        """每N页新建聊天开关变化"""
+        self.new_chat_per_pages = checked
+        self.in_pages_threshold.setEnabled(checked)
+        print(f"[DEBUG] new_chat_per_pages = {checked}")
+        
+    def _on_pages_threshold_changed(self, text: str):
+        """页数阈值变化"""
+        try:
+            self.new_chat_pages_threshold = max(1, int(text))
+            print(f"[DEBUG] new_chat_pages_threshold = {self.new_chat_pages_threshold}")
+        except ValueError:
+            pass
         
     def _start_browser(self):
         self.btn_browser.setEnabled(False)
@@ -1404,6 +1502,17 @@ class MainWindow(QMainWindow):
                             self.current_batch_index = batch_idx
                             print(f"[DEBUG] process_batches: is_running 为 False，退出循环")
                             break
+                        
+                        # 每PDF新建聊天：仅在第一个批次且不是第一个PDF时创建新聊天
+                        if batch_idx == 0 and current_pdf_idx > 0 and self.new_chat_per_pdf:
+                            self.sig_log.emit(tr("msg_creating_new_chat"), "info")
+                            try:
+                                await self.bot.create_new_chat()
+                                self.sig_log.emit(tr("msg_new_chat_created"), "success")
+                                self.pages_since_last_new_chat = 0  # 重置页数计数
+                                await asyncio.sleep(0.5)  # 简短缓冲
+                            except Exception as e:
+                                self.sig_log.emit(tr("msg_new_chat_failed", str(e)), "warning")
                             
                         batch = batches[batch_idx]
                         batch_size = len(batch)
@@ -1489,6 +1598,21 @@ class MainWindow(QMainWindow):
                                 else:
                                     self.sig_log.emit(tr("msg_retry_failed", max_retries), "error")
                                     success = True
+                        
+                        # 每N页新建聊天：检查累计页数是否达到阈值
+                        if success and self.new_chat_per_pages and self.is_running:
+                            self.pages_since_last_new_chat += batch_size
+                            if self.pages_since_last_new_chat >= self.new_chat_pages_threshold:
+                                # 只有在不是最后一个批次时才创建新聊天
+                                if batch_idx < total_batches - 1:
+                                    self.sig_log.emit(tr("msg_creating_new_chat"), "info")
+                                    try:
+                                        await self.bot.create_new_chat()
+                                        self.sig_log.emit(tr("msg_new_chat_created"), "success")
+                                        self.pages_since_last_new_chat = 0  # 重置计数
+                                        await asyncio.sleep(0.5)
+                                    except Exception as e:
+                                        self.sig_log.emit(tr("msg_new_chat_failed", str(e)), "warning")
                         
                         if batch_idx < total_batches - 1 and self.is_running:
                             await asyncio.sleep(delay)
@@ -1727,6 +1851,16 @@ class MainWindow(QMainWindow):
             self.lbl_delay.setText(tr("label_delay"))
         if hasattr(self, 'lbl_platform'):
             self.lbl_platform.setText(tr("label_platform"))
+        
+        # 更新新建聊天设置标签
+        if hasattr(self, 'lbl_new_chat_settings'):
+            self.lbl_new_chat_settings.setText(tr("label_new_chat_settings"))
+        if hasattr(self, 'cb_new_chat_pdf'):
+            self.cb_new_chat_pdf.setText(tr("label_new_chat_per_pdf"))
+        if hasattr(self, 'cb_new_chat_pages'):
+            self.cb_new_chat_pages.setText(tr("label_new_chat_per_pages"))
+        if hasattr(self, 'lbl_pages_suffix'):
+            self.lbl_pages_suffix.setText(tr("label_pages_suffix"))
         
         # 更新状态
         if not self.is_running:

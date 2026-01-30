@@ -205,6 +205,54 @@ class ChatGPTAutomation(BaseAIAutomation):
         except Exception as e:
             print(f"[ChatGPT] 检测回复时出错: {e}")
             return True
+    
+    async def create_new_chat(self) -> None:
+        """
+        在 ChatGPT 创建新的聊天窗口
+        
+        基于实际 HTML 结构优化：
+        - 按钮: <a data-testid="create-new-chat-button" href="/">
+        - 快捷键: Ctrl+Shift+O
+        """
+        print(f"[ChatGPT] 正在创建新聊天窗口...")
+        
+        # 方法1: 使用快捷键（最快，无需等待元素）
+        try:
+            await self.page.keyboard.press('Control+Shift+o')
+            await asyncio.sleep(0.5)
+            print(f"[ChatGPT] 新聊天窗口已创建 ✓ (快捷键)")
+            return
+        except Exception as e:
+            print(f"[ChatGPT] 快捷键失败: {e}")
+        
+        # 方法2: 点击精确的按钮选择器
+        try:
+            btn = self.page.locator('[data-testid="create-new-chat-button"]')
+            if await btn.count() > 0:
+                await btn.click(timeout=2000)
+                await asyncio.sleep(0.3)
+                print(f"[ChatGPT] 新聊天窗口已创建 ✓ (按钮)")
+                return
+        except Exception as e:
+            print(f"[ChatGPT] 按钮点击失败: {e}")
+        
+        # 方法3: 备用 - 使用 href="/" 链接
+        try:
+            link = self.page.locator('a[href="/"][data-sidebar-item="true"]').first
+            if await link.count() > 0:
+                await link.click(timeout=2000)
+                await asyncio.sleep(0.3)
+                print(f"[ChatGPT] 新聊天窗口已创建 ✓ (链接)")
+                return
+        except:
+            pass
+        
+        # 方法4: 最后手段 - 导航
+        try:
+            await self.page.goto(self.PLATFORM_URL, wait_until='commit', timeout=5000)
+            print(f"[ChatGPT] 新聊天窗口已创建 ✓ (导航)")
+        except:
+            print(f"[ChatGPT] 创建新聊天失败，但继续处理")
 
 
 async def test():

@@ -41,12 +41,29 @@ class BaseAIAutomation(ABC):
         # 查找系统已安装的浏览器
         chrome_path = self._find_chrome_executable()
         
+        # 浏览器性能优化参数
+        browser_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-extensions',                    # 禁用扩展
+            '--disable-background-timer-throttling',   # 禁止后台计时器节流
+            '--disable-backgrounding-occluded-windows',  # 禁止遮挡窗口后台化
+            '--disable-renderer-backgrounding',        # 禁止渲染器后台化
+            '--disable-features=TranslateUI',          # 禁用翻译
+            '--disable-hang-monitor',                  # 禁用挂起监视器
+            '--disable-ipc-flooding-protection',       # 禁用 IPC 洪水保护
+            '--disable-popup-blocking',                # 禁用弹窗拦截
+            '--disable-prompt-on-repost',              # 禁用重新发布提示
+            '--metrics-recording-only',                # 仅记录指标
+            '--no-first-run',                          # 跳过首次运行
+            '--password-store=basic',                  # 简化密码存储
+        ]
+        
         # 使用持久化上下文保持登录状态
         launch_options = {
             'user_data_dir': str(config.BROWSER_DATA_DIR),
             'headless': False,
             'viewport': {'width': 1280, 'height': 900},
-            'args': ['--disable-blink-features=AutomationControlled']
+            'args': browser_args
         }
         
         # 如果找到系统 Chrome/Edge，使用它
@@ -207,6 +224,21 @@ class BaseAIAutomation(ABC):
         """
         pass
     
+    async def create_new_chat(self) -> None:
+        """
+        在 AI 平台创建新的聊天窗口
+        
+        默认实现：导航到平台首页开始新对话
+        子类可以覆盖此方法实现更精确的新建聊天逻辑（如点击新建按钮）
+        """
+        print(f"[{self.PLATFORM_NAME}] 正在创建新聊天窗口...")
+        try:
+            await self.page.goto(self.PLATFORM_URL, wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(3)  # 等待页面稳定
+            print(f"[{self.PLATFORM_NAME}] 新聊天窗口已创建 ✓")
+        except Exception as e:
+            print(f"[{self.PLATFORM_NAME}] 创建新聊天失败: {e}")
+    
     async def close(self) -> None:
         """关闭浏览器"""
         print("正在关闭浏览器...")
@@ -244,10 +276,85 @@ class BaseAIAutomation(ABC):
         return None
     
     async def _wait_for_content_stable(self, content_selector: str, stable_duration: float = 5.0) -> None:
-        """等待内容稳定（不再变化）"""
+        """
+        等待内容稳定（不再变化）- 使用 MutationObserver 优化版本
+        
+        使用浏览器原生 MutationObserver API 替代轮询，大幅减少 DOM 查询次数，
+        提升浏览器性能。
+        
+        Args:
+            content_selector: CSS 选择器
+            stable_duration: 内容需要保持稳定的秒数
+        """
+        stable_seconds = int(stable_duration)
+        max_wait_seconds = 120  # 最大等待时间
+        
+        # 使用 MutationObserver 监听 DOM 变化
+        observer_script = f'''
+            async () => {{
+                return new Promise((resolve, reject) => {{
+                    const stableDuration = {stable_seconds};
+                    const maxWait = {max_wait_seconds};
+                    let stableCount = 0;
+                    let totalWait = 0;
+                    
+                    // 设置 MutationObserver 监听 DOM 变化
+                    const observer = new MutationObserver(() => {{
+                        stableCount = 0;  // 有变化就重置稳定计数
+                    }});
+                    
+                    // 监听整个 body 的变化
+                    observer.observe(document.body, {{
+                        childList: true,
+                        subtree: true,
+                        characterData: true,
+                        characterDataOldValue: false
+                    }});
+                    
+                    // 每秒检查一次是否稳定
+                    const checkInterval = setInterval(() => {{
+                        stableCount++;
+                        totalWait++;
+                        
+                        // 打印进度（可选）
+                        if (stableCount > 0) {{
+                            console.log(`内容稳定中... ${{stableCount}}s/${{stableDuration}}s`);
+                        }}
+                        
+                        // 达到稳定时间要求
+                        if (stableCount >= stableDuration) {{
+                            clearInterval(checkInterval);
+                            observer.disconnect();
+                            resolve('stable');
+                        }}
+                        
+                        // 超时
+                        if (totalWait >= maxWait) {{
+                            clearInterval(checkInterval);
+                            observer.disconnect();
+                            resolve('timeout');
+                        }}
+                    }}, 1000);
+                }});
+            }}
+        '''
+        
+        try:
+            result = await self.page.evaluate(observer_script)
+            if result == 'stable':
+                print(f"内容已稳定 ✓ ({stable_duration}s)")
+            else:
+                print(f"等待超时，继续执行...")
+        except Exception as e:
+            print(f"MutationObserver 执行出错: {e}，使用备用轮询方式...")
+            # 备用方案：使用传统轮询
+            await self._wait_for_content_stable_fallback(content_selector, stable_duration)
+    
+    async def _wait_for_content_stable_fallback(self, content_selector: str, stable_duration: float = 5.0) -> None:
+        """等待内容稳定（备用轮询方式）"""
         last_content = ""
         stable_time = 0
-        check_interval = 2.0
+        check_interval = 3.0  # 增大轮询间隔以减少性能开销
         
         while stable_time < stable_duration:
             try:
@@ -268,3 +375,4 @@ class BaseAIAutomation(ABC):
                 stable_time = 0
             
             await asyncio.sleep(check_interval)
+

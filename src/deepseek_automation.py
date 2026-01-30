@@ -458,6 +458,31 @@ class DeepSeekAutomation(BaseAIAutomation):
             ''')
         except:
             return ""
+    
+    async def create_new_chat(self) -> None:
+        """
+        在 DeepSeek 创建新的聊天窗口
+        
+        快捷键: Ctrl+J
+        """
+        print(f"[DeepSeek] 正在创建新聊天窗口...")
+        
+        # 方法1: 使用快捷键 Ctrl+J
+        try:
+            await self.page.keyboard.press('Control+j')
+            await asyncio.sleep(0.5)
+            print(f"[DeepSeek] 新聊天窗口已创建 ✓ (快捷键)")
+            return
+        except Exception as e:
+            print(f"[DeepSeek] 快捷键失败: {e}")
+        
+        # 方法2: 导航到首页
+        try:
+            await self.page.goto(self.PLATFORM_URL, wait_until='commit', timeout=5000)
+            await asyncio.sleep(0.5)
+            print(f"[DeepSeek] 新聊天窗口已创建 ✓ (导航)")
+        except:
+            print(f"[DeepSeek] 创建新聊天失败，但继续处理")
 
 
 async def test():
