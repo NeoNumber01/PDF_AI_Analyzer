@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QFileDialog, QMessageBox, QSizePolicy,
     QComboBox, QCheckBox
 )
-from PySide6.QtCore import Qt, QSize, Signal, QPoint, QTimer, QRectF, QMimeData, QUrl
+from PySide6.QtCore import Qt, QSize, Signal, Slot, QPoint, QTimer, QRectF, QMimeData, QUrl
 from PySide6.QtGui import (
     QPainter, QColor, QBrush, QPen, QLinearGradient, QRadialGradient,
     QFont, QPainterPath, QPixmap, QDrag
@@ -498,6 +498,12 @@ class MainWindow(QMainWindow):
         self.new_chat_pages_threshold = 30  # 每N页阈值 (默认30页)
         self.pages_since_last_new_chat = 0  # 上次新建聊天后处理的页数
         
+        # 自动暂停设置
+        self.auto_pause_on_limit = False   # 检测到上限时自动暂停 (默认关闭)
+        self.pause_duration_minutes = 30   # 暂停时长 (分钟), 0 表示无限暂停
+        self._limit_pause_timer = None     # 自动恢复定时器
+        self._limit_pause_remaining = 0    # 剩余暂停秒数
+        
         # 创建持久的事件循环 (在单独线程中运行)
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -557,6 +563,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """关闭应用时清理缓存和临时文件"""
         print("[DEBUG] 正在清理缓存...")
+        
+        # 停止暂停定时器（如果存在）
+        if hasattr(self, '_limit_pause_timer') and self._limit_pause_timer is not None:
+            self._limit_pause_timer.stop()
+            self._limit_pause_timer = None
         
         # 清理缓存中的图片文件
         for pdf_path, cache in self.pdf_cache.items():
@@ -1244,6 +1255,94 @@ class MainWindow(QMainWindow):
         
         form.addLayout(pages_layout)
         
+        # 分割线
+        divider2 = QFrame()
+        divider2.setFrameShape(QFrame.Shape.HLine)
+        divider2.setStyleSheet(f"background: {T.divider}; margin-top: 10px; margin-bottom: 5px;")
+        divider2.setFixedHeight(1)
+        form.addWidget(divider2)
+        
+        # 自动暂停设置标题
+        self.lbl_auto_pause_settings = QLabel(tr("label_auto_pause_settings"))
+        self.lbl_auto_pause_settings.setStyleSheet(f"""
+            color: {T.accent}; 
+            font-weight: bold;
+            font-size: 14px;
+            background: transparent;
+            padding-top: 8px;
+        """)
+        form.addWidget(self.lbl_auto_pause_settings)
+        
+        # 自动暂停开关
+        self.cb_auto_pause_on_limit = QCheckBox(tr("label_auto_pause_on_limit"))
+        self.cb_auto_pause_on_limit.setChecked(False)  # 默认关闭
+        self.cb_auto_pause_on_limit.setStyleSheet(f"""
+            QCheckBox {{
+                color: {T.text_primary};
+                font-size: 13px;
+                background: transparent;
+                padding: 4px 0;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+            }}
+        """)
+        self.cb_auto_pause_on_limit.toggled.connect(self._on_auto_pause_toggled)
+        form.addWidget(self.cb_auto_pause_on_limit)
+        
+        # 暂停时长选择
+        pause_duration_layout = QHBoxLayout()
+        pause_duration_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.lbl_pause_duration = QLabel(tr("label_pause_duration"))
+        self.lbl_pause_duration.setStyleSheet(f"color: {T.text_secondary}; background: transparent;")
+        pause_duration_layout.addWidget(self.lbl_pause_duration)
+        
+        self.combo_pause_duration = QComboBox()
+        self.combo_pause_duration.addItem(tr("pause_30min"), 30)
+        self.combo_pause_duration.addItem(tr("pause_1hour"), 60)
+        self.combo_pause_duration.addItem(tr("pause_custom"), -1)
+        self.combo_pause_duration.addItem(tr("pause_forever"), 0)
+        self.combo_pause_duration.setFixedWidth(120)
+        self.combo_pause_duration.setStyleSheet(f"""
+            QComboBox {{
+                background: rgba(255,255,255,0.05);
+                border: 1px solid {T.divider};
+                border-radius: 4px;
+                color: {T.text_primary};
+                padding: 4px 8px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {T.bg_mid};
+                color: {T.text_primary};
+                selection-background-color: {T.accent};
+            }}
+        """)
+        self.combo_pause_duration.setEnabled(False)  # 初始禁用
+        self.combo_pause_duration.currentIndexChanged.connect(self._on_pause_duration_changed)
+        pause_duration_layout.addWidget(self.combo_pause_duration)
+        
+        # 自定义时长输入框
+        self.in_custom_pause = GlassInput()
+        self.in_custom_pause.setText("30")
+        self.in_custom_pause.setFixedWidth(60)
+        self.in_custom_pause.setEnabled(False)
+        self.in_custom_pause.setVisible(False)  # 初始隐藏
+        self.in_custom_pause.textChanged.connect(self._on_custom_pause_changed)
+        pause_duration_layout.addWidget(self.in_custom_pause)
+        
+        self.lbl_custom_minutes = QLabel(tr("label_custom_minutes"))
+        self.lbl_custom_minutes.setStyleSheet(f"color: {T.text_secondary}; background: transparent;")
+        self.lbl_custom_minutes.setVisible(False)  # 初始隐藏
+        pause_duration_layout.addWidget(self.lbl_custom_minutes)
+        
+        pause_duration_layout.addStretch()
+        form.addLayout(pause_duration_layout)
+        
         settings_card.addLayout(form)
         space.addWidget(settings_card)
         
@@ -1345,6 +1444,147 @@ class MainWindow(QMainWindow):
             print(f"[DEBUG] new_chat_pages_threshold = {self.new_chat_pages_threshold}")
         except ValueError:
             pass
+    
+    # 自动暂停设置事件处理
+    def _on_auto_pause_toggled(self, checked: bool):
+        """自动暂停开关变化"""
+        self.auto_pause_on_limit = checked
+        self.combo_pause_duration.setEnabled(checked)
+        is_custom = self.combo_pause_duration.currentData() == -1
+        self.in_custom_pause.setEnabled(checked and is_custom)
+        print(f"[DEBUG] auto_pause_on_limit = {checked}")
+        
+    def _on_pause_duration_changed(self, index: int):
+        """暂停时长选择变化"""
+        duration = self.combo_pause_duration.currentData()
+        is_custom = (duration == -1)
+        is_enabled = self.auto_pause_on_limit
+        
+        self.in_custom_pause.setVisible(is_custom)
+        self.lbl_custom_minutes.setVisible(is_custom)
+        self.in_custom_pause.setEnabled(is_custom and is_enabled)
+        
+        if is_custom:
+            text = self.in_custom_pause.text().strip()
+            if text and text.isdigit():
+                value = int(text)
+                # 限制范围：1-1440 分钟（最大24小时）
+                self.pause_duration_minutes = max(1, min(1440, value))
+            else:
+                self.pause_duration_minutes = 30  # 默认值
+                self.in_custom_pause.setText("30")
+        else:
+            self.pause_duration_minutes = duration  # 30, 60, 或 0(无限)
+        print(f"[DEBUG] pause_duration_minutes = {self.pause_duration_minutes}")
+        
+    def _on_custom_pause_changed(self, text: str):
+        """自定义暂停时长变化"""
+        try:
+            value = int(text)
+            # 限制范围：1-1440 分钟（最大24小时）
+            self.pause_duration_minutes = max(1, min(1440, value))
+            if value > 1440:
+                self.in_custom_pause.setText("1440")  # 自动修正为最大值
+            print(f"[DEBUG] pause_duration_minutes = {self.pause_duration_minutes}")
+        except ValueError:
+            pass
+    
+    def _is_rate_limit_error(self, error: Exception) -> bool:
+        """检测是否是 API 上限错误"""
+        error_str = str(error).lower()
+        
+        # 精确匹配的上限关键词（来自各 AI 平台实际错误消息）
+        limit_keywords = [
+            # 通用
+            "rate limit", "rate_limit", "ratelimit",
+            "quota exceeded", "quota_exceeded",
+            "too many requests", "too_many_requests",
+            "limit reached", "reached your limit", "reached the limit",
+            "usage limit", "usage_limit",
+            "resource_exhausted", "resource exhausted",
+            "429",  # HTTP 429 Too Many Requests
+            
+            # ChatGPT / OpenAI
+            "message limit", "messages per hour",
+            "exceeded your current quota",
+            "you've reached your usage limit",
+            
+            # Claude
+            "you've reached your usage limit for today",
+            "claude usage limit reached",
+            "limit will reset",
+            "conversation budget",
+            
+            # Gemini
+            "you've reached your limit for chats",
+            "reached your rate limit",
+            "please wait before sending",
+            
+            # 通用限制
+            "daily limit", "hour limit", "hourly limit",
+            "limit for the hour", "limit for today"
+        ]
+        
+        return any(kw in error_str for kw in limit_keywords)
+    
+    @Slot()
+    def _on_limit_detected(self):
+        """检测到 AI 上限时调用"""
+        # 如果已有定时器在运行，先停止
+        if self._limit_pause_timer is not None:
+            self._limit_pause_timer.stop()
+            self._limit_pause_timer = None
+        
+        self.is_running = False
+        self._batch_was_paused = True
+        
+        if self.pause_duration_minutes == 0:
+            # 无限暂停
+            self._log(tr("msg_paused_forever"), "warning")
+            self._reset_ui(keep_progress=True)
+            return
+        
+        # 计算暂停时间
+        pause_seconds = self.pause_duration_minutes * 60
+        self._limit_pause_remaining = pause_seconds
+        
+        # 格式化时间显示（使用国际化）
+        from src.i18n import get_language
+        lang = get_language()
+        if self.pause_duration_minutes >= 60:
+            hours = self.pause_duration_minutes // 60
+            time_str = f"{hours} {'hour' if lang == 'en' else '小时'}"
+        else:
+            time_str = f"{self.pause_duration_minutes} {'min' if lang == 'en' else '分钟'}"
+        
+        self._log(tr("msg_limit_detected", time_str), "warning")
+        self._log(tr("msg_auto_resume_in", time_str), "info")
+        
+        # 启动定时器（设置 self 为父对象，确保内存管理）
+        from PySide6.QtCore import QTimer
+        self._limit_pause_timer = QTimer(self)
+        self._limit_pause_timer.timeout.connect(self._on_pause_tick)
+        self._limit_pause_timer.start(1000)  # 每秒触发
+        
+        self._reset_ui(keep_progress=True)
+        
+    def _on_pause_tick(self):
+        """暂停倒计时"""
+        self._limit_pause_remaining -= 1
+        
+        # 每10秒更新一次显示
+        if self._limit_pause_remaining % 10 == 0 and self._limit_pause_remaining > 0:
+            self.p_status.setText(tr("msg_limit_pause_countdown", self._limit_pause_remaining))
+        
+        if self._limit_pause_remaining <= 0:
+            # 停止定时器
+            if self._limit_pause_timer:
+                self._limit_pause_timer.stop()
+                self._limit_pause_timer = None
+            
+            # 自动恢复
+            self._log(tr("msg_auto_resumed"), "success")
+            self._start_processing()
         
     def _start_browser(self):
         self.btn_browser.setEnabled(False)
@@ -1413,6 +1653,11 @@ class MainWindow(QMainWindow):
         
     def _start_processing(self):
         print("[DEBUG] _start_processing called")  # 调试日志
+        
+        # 取消暂停定时器（如果存在），防止用户手动恢复后定时器仍触发
+        if self._limit_pause_timer is not None:
+            self._limit_pause_timer.stop()
+            self._limit_pause_timer = None
         
         if not self.pdf_files:
             self._log(tr("msg_add_pdf_first"), "warning")
@@ -1591,6 +1836,19 @@ class MainWindow(QMainWindow):
                                     
                             except Exception as e:
                                 self.sig_log.emit(tr("msg_send_failed", str(e)), "error")
+                                
+                                # 检测是否是 API 上限错误
+                                if self.auto_pause_on_limit and self._is_rate_limit_error(e):
+                                    # 保存当前批次位置以便恢复
+                                    self.current_batch_index = batch_idx
+                                    # 使用信号在主线程触发暂停
+                                    from PySide6.QtCore import QMetaObject, Qt as QtCoreQt
+                                    QMetaObject.invokeMethod(
+                                        self, "_on_limit_detected",
+                                        QtCoreQt.QueuedConnection
+                                    )
+                                    return  # 退出处理循环
+                                
                                 retry_count += 1
                                 if retry_count <= max_retries:
                                     self.sig_log.emit(tr("msg_wait_retry", retry_delay), "warning")
@@ -1755,6 +2013,18 @@ class MainWindow(QMainWindow):
                                         
                                 except Exception as e:
                                     self.sig_log.emit(tr("msg_send_failed", str(e)), "error")
+                                    
+                                    # 检测是否是 API 上限错误
+                                    if self.auto_pause_on_limit and self._is_rate_limit_error(e):
+                                        self.current_pdf_index = i
+                                        self.current_page_index = j
+                                        from PySide6.QtCore import QMetaObject, Qt as QtCoreQt
+                                        QMetaObject.invokeMethod(
+                                            self, "_on_limit_detected",
+                                            QtCoreQt.QueuedConnection
+                                        )
+                                        return
+                                    
                                     retry_count += 1
                                     if retry_count <= max_retries:
                                         self.sig_log.emit(tr("msg_wait_retry", retry_delay), "warning")
@@ -1794,6 +2064,12 @@ class MainWindow(QMainWindow):
     def _stop(self):
         self.is_running = False
         self._batch_was_paused = True  # 标记用户暂停，下次可以续传
+        
+        # 取消暂停定时器（如果存在）
+        if self._limit_pause_timer is not None:
+            self._limit_pause_timer.stop()
+            self._limit_pause_timer = None
+        
         self._log(tr("msg_paused", self.current_pdf_index + 1, self.current_page_index + 1), "warning")
         self._reset_ui(keep_progress=True)
     
@@ -1861,6 +2137,22 @@ class MainWindow(QMainWindow):
             self.cb_new_chat_pages.setText(tr("label_new_chat_per_pages"))
         if hasattr(self, 'lbl_pages_suffix'):
             self.lbl_pages_suffix.setText(tr("label_pages_suffix"))
+        
+        # 更新自动暂停设置标签
+        if hasattr(self, 'lbl_auto_pause_settings'):
+            self.lbl_auto_pause_settings.setText(tr("label_auto_pause_settings"))
+        if hasattr(self, 'cb_auto_pause_on_limit'):
+            self.cb_auto_pause_on_limit.setText(tr("label_auto_pause_on_limit"))
+        if hasattr(self, 'lbl_pause_duration'):
+            self.lbl_pause_duration.setText(tr("label_pause_duration"))
+        if hasattr(self, 'lbl_custom_minutes'):
+            self.lbl_custom_minutes.setText(tr("label_custom_minutes"))
+        if hasattr(self, 'combo_pause_duration'):
+            # 更新下拉框选项文本
+            self.combo_pause_duration.setItemText(0, tr("pause_30min"))
+            self.combo_pause_duration.setItemText(1, tr("pause_1hour"))
+            self.combo_pause_duration.setItemText(2, tr("pause_custom"))
+            self.combo_pause_duration.setItemText(3, tr("pause_forever"))
         
         # 更新状态
         if not self.is_running:

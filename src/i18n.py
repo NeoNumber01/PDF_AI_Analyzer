@@ -137,6 +137,35 @@ translations = {
         "msg_new_chat_created": "新聊天窗口已创建",
         "msg_new_chat_failed": "创建新聊天窗口失败: {}",
         
+        # 页数范围选择
+        "label_page_range": "页数范围:",
+        "label_from_page": "从",
+        "label_to_page": "到",
+        "label_page_suffix": "页",
+        "btn_check_range": "勾选范围",
+        "btn_uncheck_range": "取消范围",
+        "btn_check_selected": "勾选选中",
+        "btn_uncheck_selected": "取消选中",
+        "tip_rubber_band": "💡 拖拽鼠标框选多个页面",
+        "btn_undo": "撤销 (Ctrl+Z)",
+        "msg_undo_success": "已撤销操作",
+        "msg_nothing_to_undo": "没有可撤销的操作",
+        
+        # 自动暂停功能
+        "label_auto_pause_settings": "⏸️ 上限自动暂停",
+        "label_auto_pause_on_limit": "检测到上限时自动暂停",
+        "label_pause_duration": "暂停时长:",
+        "pause_30min": "30 分钟",
+        "pause_1hour": "1 小时",
+        "pause_custom": "自定义",
+        "pause_forever": "无限暂停",
+        "label_custom_minutes": "分钟",
+        "msg_limit_detected": "检测到 AI 上限，自动暂停 {}",
+        "msg_auto_resume_in": "将在 {} 后自动恢复",
+        "msg_paused_forever": "已暂停，请手动恢复",
+        "msg_auto_resumed": "自动恢复处理",
+        "msg_limit_pause_countdown": "上限暂停中，剩余 {} 秒",
+        
         # 语言
         "language": "语言",
     },
@@ -269,6 +298,35 @@ translations = {
         "msg_creating_new_chat": "Creating new chat window...",
         "msg_new_chat_created": "New chat window created",
         "msg_new_chat_failed": "Failed to create new chat: {}",
+        
+        # Page range selection
+        "label_page_range": "Page Range:",
+        "label_from_page": "From",
+        "label_to_page": "To",
+        "label_page_suffix": "page(s)",
+        "btn_check_range": "Check Range",
+        "btn_uncheck_range": "Uncheck Range",
+        "btn_check_selected": "Check Selected",
+        "btn_uncheck_selected": "Uncheck Selected",
+        "tip_rubber_band": "💡 Drag to select pages",
+        "btn_undo": "Undo (Ctrl+Z)",
+        "msg_undo_success": "Action undone",
+        "msg_nothing_to_undo": "Nothing to undo",
+        
+        # Auto pause on limit
+        "label_auto_pause_settings": "⏸️ Auto Pause on Limit",
+        "label_auto_pause_on_limit": "Auto pause on rate limit",
+        "label_pause_duration": "Pause duration:",
+        "pause_30min": "30 min",
+        "pause_1hour": "1 hour",
+        "pause_custom": "Custom",
+        "pause_forever": "Forever",
+        "label_custom_minutes": "min",
+        "msg_limit_detected": "Rate limit detected, pausing for {}",
+        "msg_auto_resume_in": "Auto resume in {}",
+        "msg_paused_forever": "Paused, click Start to resume",
+        "msg_auto_resumed": "Auto resumed",
+        "msg_limit_pause_countdown": "Rate limit pause, {} sec left",
         
         # Language
         "language": "Language",

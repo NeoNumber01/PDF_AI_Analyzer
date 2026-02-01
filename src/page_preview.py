@@ -11,10 +11,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
     QLabel, QCheckBox, QPushButton, QFrame, QSpinBox, QButtonGroup,
     QRadioButton, QListWidget, QListWidgetItem, QSizePolicy, QComboBox,
-    QGraphicsDropShadowEffect, QDialog, QApplication
+    QGraphicsDropShadowEffect, QDialog, QApplication, QRubberBand
 )
-from PySide6.QtCore import Qt, Signal, QSize, QMimeData
-from PySide6.QtGui import QPixmap, QFont, QPainter, QColor, QDrag, QPen, QBrush
+from PySide6.QtCore import Qt, Signal, QSize, QMimeData, QRect, QPoint
+from PySide6.QtGui import QPixmap, QFont, QPainter, QColor, QDrag, QPen, QBrush, QShortcut, QKeySequence
 
 from src.i18n import tr, get_language
 
@@ -760,9 +760,17 @@ class PageThumbnail(QFrame):
         layout.addLayout(bottom)
         
     def _on_toggle(self, checked: bool):
+        print(f"[PageThumbnail._on_toggle] index={self.index}, checked={checked}", flush=True)
+        # 诊断：检查信号连接数量
+        try:
+            receivers = self.toggled.receivers(self.toggled)
+            print(f"[PageThumbnail._on_toggle] toggled 信号接收者数量: {receivers}", flush=True)
+        except Exception as e:
+            print(f"[PageThumbnail._on_toggle] 无法获取接收者数量: {e}", flush=True)
         self._checked = checked
         self._update_style()
         self.toggled.emit(self.index, checked)
+        print(f"[PageThumbnail._on_toggle] toggled 信号已发射", flush=True)
         
     def set_checked(self, checked: bool):
         self.checkbox.setChecked(checked)
@@ -850,10 +858,85 @@ class PageThumbnail(QFrame):
             self.double_clicked.emit(self.index, self.image_path)
         super().mouseDoubleClickEvent(event)
 
+# ═══════════════════════════════════════════════════════════
+# 支持框选的滚动区域
+# ═══════════════════════════════════════════════════════════
+
+class RubberBandScrollArea(QScrollArea):
+    """支持鼠标框选的滚动区域"""
+    
+    selection_finished = Signal(QRect)  # 框选完成信号，传递选择区域
+    empty_click = Signal()  # 空白区域单击信号，用于清除选中
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rubber_band = None
+        self.origin = QPoint()
+        self.is_selecting = False
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # 检查是否点击在空白区域（不在子控件上）
+            widget = self.widget()
+            if widget:
+                # 将鼠标位置转换到 widget 坐标系
+                widget_pos = self.viewport().mapToGlobal(event.pos())
+                widget_pos = widget.mapFromGlobal(widget_pos)
+                child = widget.childAt(widget_pos)
+                
+                # 如果点击在空白区域，开始框选
+                if child is None:
+                    self.origin = event.pos()
+                    if not self.rubber_band:
+                        self.rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+                    self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+                    self.rubber_band.show()
+                    self.is_selecting = True
+                    return
+        
+        super().mousePressEvent(event)
+        
+    def mouseMoveEvent(self, event):
+        if self.is_selecting and self.rubber_band:
+            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+        else:
+            super().mouseMoveEvent(event)
+            
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_selecting:
+            self.is_selecting = False
+            if self.rubber_band:
+                # 获取选择区域（viewport 坐标）
+                selection_rect = self.rubber_band.geometry()
+                self.rubber_band.hide()
+                
+                # 检查是否是单击（拖拽距离很小）
+                if selection_rect.width() < 10 and selection_rect.height() < 10:
+                    # 这是单击空白区域，发送清除选中信号
+                    self.empty_click.emit()
+                    return
+                
+                # 将 viewport 坐标转换为 widget 坐标
+                if self.widget():
+                    # 考虑滚动偏移
+                    scroll_offset = QPoint(
+                        self.horizontalScrollBar().value(),
+                        self.verticalScrollBar().value()
+                    )
+                    widget_rect = QRect(
+                        selection_rect.topLeft() + scroll_offset,
+                        selection_rect.size()
+                    )
+                    self.selection_finished.emit(widget_rect)
+            return
+            
+        super().mouseReleaseEvent(event)
+
 
 # ═══════════════════════════════════════════════════════════
 # 页面预览面板
 # ═══════════════════════════════════════════════════════════
+
 
 class PagePreviewPanel(QWidget):
     """页面预览面板 - 显示所有页面缩略图"""
@@ -872,7 +955,14 @@ class PagePreviewPanel(QWidget):
         self.custom_groups: List[List[int]] = []  # 自定义分组列表
         self.next_group_id = 0                 # 下一个分组ID
         
+        # 撤销历史记录栈（存储勾选状态快照）
+        self._undo_stack: List[List[bool]] = []
+        self._max_undo_steps = 50  # 最多保存50步撤销历史
+        self._is_undoing = False  # 撤销操作标志，防止撤销时重复保存状态
+        self._is_batch_operation = False  # 批量操作标志，防止批量操作时每个页面都保存状态
+        
         self._setup_ui()
+        self._setup_shortcuts()
         
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -915,6 +1005,16 @@ class PagePreviewPanel(QWidget):
         self.btn_clear_groups.clicked.connect(self._clear_all_groups)
         toolbar.addWidget(self.btn_clear_groups)
         
+        # 撤销按钮
+        toolbar.addSpacing(20)
+        self.btn_undo = QPushButton("↩ " + tr("btn_undo"))
+        self.btn_undo.setFixedHeight(28)
+        self.btn_undo.setCursor(Qt.PointingHandCursor)
+        self.btn_undo.setStyleSheet(self._undo_button_style())
+        self.btn_undo.clicked.connect(self._undo)
+        self.btn_undo.setToolTip("Ctrl+Z")
+        toolbar.addWidget(self.btn_undo)
+        
         toolbar.addStretch()
         
         self.count_label = QLabel(tr("total_pages", 0))
@@ -923,11 +1023,90 @@ class PagePreviewPanel(QWidget):
         
         layout.addLayout(toolbar)
         
-        # 滚动区域
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(f"""
+        # 第二行工具栏：页数范围选择 + 框选操作
+        toolbar2 = QHBoxLayout()
+        toolbar2.setSpacing(T.space_s)
+        
+        # 页数范围输入
+        self.label_page_range = QLabel(tr("label_page_range"))
+        self.label_page_range.setStyleSheet(f"color: {T.text_secondary}; font-size: 12px;")
+        toolbar2.addWidget(self.label_page_range)
+        
+        self.label_from = QLabel(tr("label_from_page"))
+        self.label_from.setStyleSheet(f"color: {T.text_tertiary}; font-size: 12px;")
+        toolbar2.addWidget(self.label_from)
+        
+        self.spin_from_page = QSpinBox()
+        self.spin_from_page.setMinimum(1)
+        self.spin_from_page.setMaximum(9999)
+        self.spin_from_page.setValue(1)
+        self.spin_from_page.setFixedWidth(60)
+        self.spin_from_page.setFixedHeight(26)
+        self.spin_from_page.setStyleSheet(self._spinbox_style())
+        toolbar2.addWidget(self.spin_from_page)
+        
+        self.label_to = QLabel(tr("label_to_page"))
+        self.label_to.setStyleSheet(f"color: {T.text_tertiary}; font-size: 12px;")
+        toolbar2.addWidget(self.label_to)
+        
+        self.spin_to_page = QSpinBox()
+        self.spin_to_page.setMinimum(1)
+        self.spin_to_page.setMaximum(9999)
+        self.spin_to_page.setValue(1)
+        self.spin_to_page.setFixedWidth(60)
+        self.spin_to_page.setFixedHeight(26)
+        self.spin_to_page.setStyleSheet(self._spinbox_style())
+        toolbar2.addWidget(self.spin_to_page)
+        
+        self.label_page_suffix = QLabel(tr("label_page_suffix"))
+        self.label_page_suffix.setStyleSheet(f"color: {T.text_tertiary}; font-size: 12px;")
+        toolbar2.addWidget(self.label_page_suffix)
+        
+        self.btn_check_range = QPushButton(tr("btn_check_range"))
+        self.btn_check_range.setFixedHeight(26)
+        self.btn_check_range.setCursor(Qt.PointingHandCursor)
+        self.btn_check_range.setStyleSheet(self._small_button_style())
+        self.btn_check_range.clicked.connect(lambda: self._apply_range(True))
+        toolbar2.addWidget(self.btn_check_range)
+        
+        self.btn_uncheck_range = QPushButton(tr("btn_uncheck_range"))
+        self.btn_uncheck_range.setFixedHeight(26)
+        self.btn_uncheck_range.setCursor(Qt.PointingHandCursor)
+        self.btn_uncheck_range.setStyleSheet(self._small_button_style())
+        self.btn_uncheck_range.clicked.connect(lambda: self._apply_range(False))
+        toolbar2.addWidget(self.btn_uncheck_range)
+        
+        toolbar2.addSpacing(15)
+        
+        # 框选操作按钮
+        self.btn_check_selected = QPushButton(tr("btn_check_selected"))
+        self.btn_check_selected.setFixedHeight(26)
+        self.btn_check_selected.setCursor(Qt.PointingHandCursor)
+        self.btn_check_selected.setStyleSheet(self._small_button_style())
+        self.btn_check_selected.clicked.connect(lambda: self._toggle_selected_pages(True))
+        toolbar2.addWidget(self.btn_check_selected)
+        
+        self.btn_uncheck_selected = QPushButton(tr("btn_uncheck_selected"))
+        self.btn_uncheck_selected.setFixedHeight(26)
+        self.btn_uncheck_selected.setCursor(Qt.PointingHandCursor)
+        self.btn_uncheck_selected.setStyleSheet(self._small_button_style())
+        self.btn_uncheck_selected.clicked.connect(lambda: self._toggle_selected_pages(False))
+        toolbar2.addWidget(self.btn_uncheck_selected)
+        
+        toolbar2.addStretch()
+        
+        # 提示文字
+        self.tip_rubber_band = QLabel(tr("tip_rubber_band"))
+        self.tip_rubber_band.setStyleSheet(f"color: {T.text_tertiary}; font-size: 11px;")
+        toolbar2.addWidget(self.tip_rubber_band)
+        
+        layout.addLayout(toolbar2)
+        
+        # 滚动区域（支持鼠标框选）
+        self.scroll_area = RubberBandScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setStyleSheet(f"""
             QScrollArea {{
                 background: transparent;
                 border: none;
@@ -946,6 +1125,8 @@ class PagePreviewPanel(QWidget):
                 height: 0px;
             }}
         """)
+        self.scroll_area.selection_finished.connect(self._on_rubber_band_selection)
+        self.scroll_area.empty_click.connect(self._clear_selection)
         
         self.grid_container = QWidget()
         self.grid_container.setStyleSheet("background: transparent;")
@@ -953,8 +1134,8 @@ class PagePreviewPanel(QWidget):
         self.grid_layout.setContentsMargins(T.space_s, T.space_s, T.space_s, T.space_s)
         self.grid_layout.setSpacing(T.space_m)
         
-        scroll.setWidget(self.grid_container)
-        layout.addWidget(scroll, 1)
+        self.scroll_area.setWidget(self.grid_container)
+        layout.addWidget(self.scroll_area, 1)
         
     def _button_style(self):
         return f"""
@@ -994,8 +1175,251 @@ class PagePreviewPanel(QWidget):
                 background: rgba(34, 197, 94, 0.3);
             }}
         """
-
+    
+    def _spinbox_style(self):
+        return f"""
+            QSpinBox {{
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid {T.border};
+                border-radius: 4px;
+                color: {T.text_primary};
+                padding: 2px 6px;
+                font-size: 12px;
+            }}
+            QSpinBox:focus {{
+                border-color: {T.accent};
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: 16px;
+                background: rgba(255, 255, 255, 0.05);
+                border: none;
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background: rgba(255, 255, 255, 0.15);
+            }}
+        """
+    
+    def _small_button_style(self):
+        return f"""
+            QPushButton {{
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid {T.border};
+                border-radius: 4px;
+                color: {T.text_secondary};
+                padding: 3px 8px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255, 255, 255, 0.1);
+                border-color: {T.accent};
+                color: {T.text_primary};
+            }}
+            QPushButton:pressed {{
+                background: {T.bg_selected};
+            }}
+        """
+    
+    def _undo_button_style(self):
+        return f"""
+            QPushButton {{
+                background: rgba(251, 191, 36, 0.1);
+                border: 1px solid {T.warning};
+                border-radius: 6px;
+                color: {T.warning};
+                padding: 4px 10px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background: rgba(251, 191, 36, 0.2);
+            }}
+            QPushButton:pressed {{
+                background: rgba(251, 191, 36, 0.3);
+            }}
+        """
+    
+    def _setup_shortcuts(self):
+        """设置快捷键"""
+        # Ctrl+Z 撤销
+        self.shortcut_undo = QShortcut(QKeySequence.Undo, self)
+        self.shortcut_undo.activated.connect(self._undo)
+    
+    def _save_state(self):
+        """保存当前勾选状态到历史记录"""
+        if not self.thumbnails:
+            return
         
+        # 获取当前所有页面的勾选状态
+        current_state = [thumb.is_checked() for thumb in self.thumbnails]
+        
+        # 避免保存重复的状态
+        if self._undo_stack and self._undo_stack[-1] == current_state:
+            return
+        
+        self._undo_stack.append(current_state)
+        
+        # 限制历史记录数量
+        if len(self._undo_stack) > self._max_undo_steps:
+            self._undo_stack.pop(0)
+    
+    def _undo(self):
+        """撤销上一步操作"""
+        print(f"[UNDO] 撤销栈大小: {len(self._undo_stack)}")
+        if not self._undo_stack:
+            print("[UNDO] 撤销栈为空，无法撤销")
+            return
+        
+        # 弹出上一个状态
+        previous_state = self._undo_stack.pop()
+        print(f"[UNDO] 恢复状态: {previous_state}")
+        
+        # 获取当前状态用于对比
+        current_state = [thumb.is_checked() for thumb in self.thumbnails]
+        print(f"[UNDO] 当前状态: {current_state}")
+        
+        # 设置标志，防止恢复状态时触发的 toggled 信号再次保存状态
+        self._is_undoing = True
+        try:
+            # 恢复勾选状态
+            for i, thumb in enumerate(self.thumbnails):
+                if i < len(previous_state):
+                    thumb.set_checked(previous_state[i])
+        finally:
+            self._is_undoing = False
+        
+        # 验证恢复后的状态
+        final_state = [thumb.is_checked() for thumb in self.thumbnails]
+        print(f"[UNDO] 恢复后状态: {final_state}")
+    
+    def _apply_range(self, checked: bool):
+        """应用页数范围勾选/取消勾选"""
+        self._save_state()  # 保存当前状态用于撤销
+        from_page = self.spin_from_page.value()
+        to_page = self.spin_to_page.value()
+        
+        # 确保范围有效
+        if from_page > to_page:
+            from_page, to_page = to_page, from_page
+            self.spin_from_page.setValue(from_page)
+            self.spin_to_page.setValue(to_page)
+        
+        # 转换为索引 (页码从1开始，索引从0开始)
+        start_idx = from_page - 1
+        end_idx = to_page - 1
+        
+        # 应用到范围内的页面
+        self._is_batch_operation = True
+        try:
+            for thumb in self.thumbnails:
+                if start_idx <= thumb.index <= end_idx:
+                    thumb.set_checked(checked)
+        finally:
+            self._is_batch_operation = False
+    
+    def _toggle_selected_pages(self, checked: bool):
+        """批量切换选中页面的勾选状态"""
+        print(f"[DEBUG] _toggle_selected_pages: checked={checked}, selected_indices={self.selected_indices}")
+        if not self.selected_indices:
+            return
+        self._save_state()  # 保存当前状态用于撤销
+        self._is_batch_operation = True  # 开始批量操作
+        try:
+            for idx in self.selected_indices:
+                thumb = self._get_thumbnail_by_index(idx)
+                if thumb:
+                    print(f"[DEBUG] _toggle_selected_pages: setting thumb index={idx} to checked={checked}")
+                    thumb.set_checked(checked)
+        finally:
+            self._is_batch_operation = False  # 结束批量操作
+    
+    def _on_rubber_band_selection(self, selection_rect: QRect):
+        """处理鼠标框选完成后的选择"""
+        # 检查选择区域是否足够大（避免误点击）
+        if selection_rect.width() < 10 or selection_rect.height() < 10:
+            return
+        
+        # 获取修饰键状态
+        modifiers = QApplication.keyboardModifiers()
+        
+        # 如果没有按 Ctrl，先清除之前的选择
+        if not (modifiers & Qt.ControlModifier):
+            self.selected_indices.clear()
+            for thumb in self.thumbnails:
+                thumb.set_selected(False)
+        
+        # 检测与选择区域相交的缩略图
+        for thumb in self.thumbnails:
+            thumb_rect = QRect(thumb.pos(), thumb.size())
+            if selection_rect.intersects(thumb_rect):
+                if thumb.index not in self.selected_indices:
+                    self.selected_indices.append(thumb.index)
+                thumb.set_selected(True)
+        
+        # 发送选择变化信号
+        self.selection_changed.emit(self.selected_indices.copy())
+    
+    def _clear_selection(self):
+        """清除所有页面的选中状态（蓝色边框）"""
+        self.selected_indices.clear()
+        for thumb in self.thumbnails:
+            thumb.set_selected(False)
+        self.selection_changed.emit([])
+    
+    def _select_all(self):
+        """勾选所有页面"""
+        self._save_state()  # 保存当前状态用于撤销
+        self._is_batch_operation = True
+        try:
+            for thumb in self.thumbnails:
+                thumb.set_checked(True)
+        finally:
+            self._is_batch_operation = False
+    
+    def _deselect_all(self):
+        """取消勾选所有页面"""
+        self._save_state()  # 保存当前状态用于撤销
+        self._is_batch_operation = True
+        try:
+            for thumb in self.thumbnails:
+                thumb.set_checked(False)
+        finally:
+            self._is_batch_operation = False
+    
+    def _on_page_toggled(self, index: int, checked: bool):
+        """处理单个页面的勾选变化"""
+        print(f"[TOGGLE] 页面 {index} 勾选变化: {checked}, _is_undoing={self._is_undoing}, _is_batch={self._is_batch_operation}", flush=True)
+        
+        # 如果正在执行撤销操作或批量操作，不保存状态
+        if self._is_undoing or self._is_batch_operation:
+            print("[TOGGLE] 正在撤销或批量操作，跳过保存状态", flush=True)
+            self.page_toggled.emit(index, checked)
+            return
+        
+        # 构造"改变前"的状态快照
+        # 由于信号是在状态改变后发出的，我们需要反转当前页面的状态来获得改变前的状态
+        previous_state = []
+        for thumb in self.thumbnails:
+            if thumb.index == index:
+                # 这个页面刚刚改变了，保存相反的状态（即改变前的状态）
+                previous_state.append(not checked)
+            else:
+                previous_state.append(thumb.is_checked())
+        
+        print(f"[TOGGLE] 保存改变前状态: {previous_state[:5]}... (共{len(previous_state)}项)", flush=True)
+        print(f"[TOGGLE] 撤销栈大小: {len(self._undo_stack)}", flush=True)
+        
+        # 避免保存重复的状态
+        if self._undo_stack and self._undo_stack[-1] == previous_state:
+            return
+        
+        self._undo_stack.append(previous_state)
+        
+        # 限制历史记录数量
+        if len(self._undo_stack) > self._max_undo_steps:
+            self._undo_stack.pop(0)
+        
+        # 发射页面勾选变化信号
+        self.page_toggled.emit(index, checked)
+
     def _create_group_from_selection(self):
         """从当前选中的页面创建分组"""
         if len(self.selected_indices) < 2:
@@ -1085,6 +1509,8 @@ class PagePreviewPanel(QWidget):
         for i, path in enumerate(image_paths):
             thumb = PageThumbnail(i, path)
             thumb.toggled.connect(self._on_page_toggled)
+            if i == 0:  # 只打印第一个的调试信息
+                print(f"[DEBUG] 连接信号: thumb.toggled -> self._on_page_toggled, self={id(self)}", flush=True)
             thumb.clicked.connect(self._on_page_clicked)
             thumb.double_clicked.connect(self._on_page_double_clicked)
             
@@ -1092,6 +1518,15 @@ class PagePreviewPanel(QWidget):
             col = i % cols
             self.grid_layout.addWidget(thumb, row, col)
             self.thumbnails.append(thumb)
+        
+        # 更新页数范围 SpinBox
+        total_pages = len(image_paths)
+        if hasattr(self, 'spin_from_page'):
+            self.spin_from_page.setMaximum(max(1, total_pages))
+            self.spin_from_page.setValue(1)
+        if hasattr(self, 'spin_to_page'):
+            self.spin_to_page.setMaximum(max(1, total_pages))
+            self.spin_to_page.setValue(total_pages)
             
         self.count_label.setText(f"共 {len(image_paths)} 页")
         
@@ -1107,6 +1542,9 @@ class PagePreviewPanel(QWidget):
         self.custom_groups.clear()
         self.next_group_id = 0
         
+        # 清除撤销历史，确保每个PDF的撤销历史独立
+        self._undo_stack.clear()
+        
         # 清除布局中的所有项
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
@@ -1114,9 +1552,6 @@ class PagePreviewPanel(QWidget):
                 item.widget().deleteLater()
                 
         self.count_label.setText("共 0 页")
-        
-    def _on_page_toggled(self, index: int, checked: bool):
-        self.page_toggled.emit(index, checked)
         
     def _on_page_clicked(self, index: int):
         """处理页面点击 - 支持多选"""
@@ -1192,6 +1627,28 @@ class PagePreviewPanel(QWidget):
             self.btn_create_group.setText("🔗 " + tr("btn_create_group"))
         if hasattr(self, 'btn_clear_groups'):
             self.btn_clear_groups.setText("🗑️ " + tr("btn_clear_groups"))
+        
+        # 更新页数范围标签和按钮
+        if hasattr(self, 'label_page_range'):
+            self.label_page_range.setText(tr("label_page_range"))
+        if hasattr(self, 'label_from'):
+            self.label_from.setText(tr("label_from_page"))
+        if hasattr(self, 'label_to'):
+            self.label_to.setText(tr("label_to_page"))
+        if hasattr(self, 'label_page_suffix'):
+            self.label_page_suffix.setText(tr("label_page_suffix"))
+        if hasattr(self, 'btn_check_range'):
+            self.btn_check_range.setText(tr("btn_check_range"))
+        if hasattr(self, 'btn_uncheck_range'):
+            self.btn_uncheck_range.setText(tr("btn_uncheck_range"))
+        if hasattr(self, 'btn_check_selected'):
+            self.btn_check_selected.setText(tr("btn_check_selected"))
+        if hasattr(self, 'btn_uncheck_selected'):
+            self.btn_uncheck_selected.setText(tr("btn_uncheck_selected"))
+        if hasattr(self, 'tip_rubber_band'):
+            self.tip_rubber_band.setText(tr("tip_rubber_band"))
+        if hasattr(self, 'btn_undo'):
+            self.btn_undo.setText("↩ " + tr("btn_undo"))
         
         # 更新页数标签
         if hasattr(self, 'count_label'):
@@ -1824,10 +2281,15 @@ class PagePreviewDialog(QDialog):
         # 显示弹窗
         dialog = BatchOrderDialog(groups, enabled, page_images, self)
         
-        # 如果有已保存的顺序且与当前分组匹配，恢复到弹窗中（过滤禁用页面）
+        # 如果有已保存的顺序且与当前分组匹配，恢复到弹窗中（过滤禁用页面 + 添加新启用页面）
         if existing_order:
             # 获取当前启用的页面索引
             enabled_indices = set(i for i, e in enumerate(enabled) if e)
+            
+            # 收集已保存顺序中包含的页面索引
+            saved_pages = set()
+            for b in existing_order:
+                saved_pages.update(b['pages'])
             
             # 过滤掉禁用的页面
             filtered_order = []
@@ -1837,6 +2299,17 @@ class PagePreviewDialog(QDialog):
                     filtered_order.append({
                         'type': b['type'] if len(valid_pages) > 1 else 'page',
                         'pages': valid_pages
+                    })
+            
+            # 找出新启用的页面（在 enabled_indices 中但不在 saved_pages 中）
+            new_enabled_pages = sorted(enabled_indices - saved_pages)
+            if new_enabled_pages:
+                print(f"[DEBUG] _open_batch_order: 发现新启用的页面: {new_enabled_pages}")
+                # 将新启用的页面添加到末尾（每页作为单独批次）
+                for page_idx in new_enabled_pages:
+                    filtered_order.append({
+                        'type': 'page',
+                        'pages': [page_idx]
                     })
             
             if filtered_order:
