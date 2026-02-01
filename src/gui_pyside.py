@@ -1509,6 +1509,10 @@ class MainWindow(QMainWindow):
             "exceeded your current quota",
             "you've reached your usage limit",
             
+            # ChatGPT 上传限额（来自我们的检测）
+            "upload limit reached", "无法上传", "最多可上传",
+            "unable to upload", "upload failed",
+            
             # Claude
             "you've reached your usage limit for today",
             "claude usage limit reached",

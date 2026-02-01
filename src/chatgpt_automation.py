@@ -87,6 +87,11 @@ class ChatGPTAutomation(BaseAIAutomation):
                 print(f"图片上传成功 ✓")
             
             await asyncio.sleep(2)  # 等待图片上传完成
+            
+            # 检测页面是否显示上传限额错误
+            upload_error = await self._detect_upload_limit_error()
+            if upload_error:
+                raise Exception(f"Upload limit reached: {upload_error}")
         
         # 等待所有图片上传完成
         if len(image_paths) > 1:
@@ -205,6 +210,76 @@ class ChatGPTAutomation(BaseAIAutomation):
         except Exception as e:
             print(f"[ChatGPT] 检测回复时出错: {e}")
             return True
+    
+    async def _detect_upload_limit_error(self) -> str:
+        """
+        检测页面是否显示上传限额错误
+        
+        Returns:
+            错误信息字符串（如果检测到），否则返回空字符串
+        """
+        try:
+            # ChatGPT 的错误 Toast 可能出现在多种位置
+            # 检测页面中的错误提示元素
+            error_selectors = [
+                # Toast 通知区域
+                '[role="alert"]',
+                '[data-testid*="toast"]',
+                '.toast-message',
+                '.error-message',
+                # 通用 alert 类
+                '[class*="alert"]',
+                '[class*="error"]',
+                '[class*="warning"]',
+                # 特定的上传错误区域
+                '[class*="upload-error"]',
+            ]
+            
+            # 检测错误关键词（中英文）
+            error_keywords = [
+                # 中文
+                "无法上传", "上传失败", "最多可上传", "上传限制",
+                "文件过多", "超出限制", "达到上限",
+                # 英文
+                "unable to upload", "upload failed", "cannot upload",
+                "upload limit", "too many files", "limit reached",
+                "max files", "maximum files", "file limit",
+            ]
+            
+            for selector in error_selectors:
+                try:
+                    elements = self.page.locator(selector)
+                    count = await elements.count()
+                    for i in range(count):
+                        element = elements.nth(i)
+                        if await element.is_visible():
+                            text = await element.text_content()
+                            if text:
+                                text_lower = text.lower()
+                                for keyword in error_keywords:
+                                    if keyword.lower() in text_lower:
+                                        print(f"[ChatGPT] 检测到上传限额错误: {text[:100]}")
+                                        return text
+                except:
+                    continue
+            
+            # 备用方法：直接检查整个页面的文本内容
+            try:
+                page_content = await self.page.content()
+                page_lower = page_content.lower()
+                # 只检测关键的限额指示器
+                if "最多可上传 0 个" in page_content or "最多可上传0个" in page_content:
+                    return "最多可上传 0 个文件"
+                if "max files: 0" in page_lower or "maximum files: 0" in page_lower:
+                    return "Maximum files: 0"
+            except:
+                pass
+            
+            return ""
+        except Exception as e:
+            print(f"[ChatGPT] 检测上传限额时出错: {e}")
+            return ""
+
     
     async def create_new_chat(self) -> None:
         """
